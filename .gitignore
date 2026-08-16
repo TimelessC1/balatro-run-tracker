@@ -1,0 +1,15 @@
+# Configuracion local: puede llevar un token de un servidor propio.
+# El mod funciona sin este fichero; los valores por defecto estan en main.lua.
+RunTracker/settings.lua
+
+# Ficheros que el mod genera en la carpeta de guardado de Balatro.
+run_tracker_results.txt
+run_tracker_log.jsonl
+run_tracker_pending.jsonl
+run_tracker_identity.txt
+
+# Paquetes generados
+*.zip
+
+.DS_Store
+Thumbs.db

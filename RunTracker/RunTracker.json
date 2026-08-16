@@ -1,0 +1,17 @@
+{
+	"id": "RunTracker",
+	"name": "Run Tracker",
+	"display_name": "Tracker",
+	"author": ["TimelessC1"],
+	"description": "Records every run you finish (seed, result, ante, deck, stake and the jokers you held) and uploads it to balatro-run-tracker.timelessc.workers.dev, where you can browse and filter every run.",
+	"prefix": "runtrk",
+	"main_file": "main.lua",
+	"priority": 0,
+	"badge_colour": "3FA9F5",
+	"badge_text_colour": "FFFFFF",
+	"version": "1.15.0",
+	"config_file": "config.lua",
+	"dependencies": [
+		"Steamodded (>=1.*)"
+	]
+}

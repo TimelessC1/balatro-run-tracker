@@ -1,0 +1,8 @@
+# Balatro Run Tracker - results
+# date | result | seed | ante | round | blind | points | deck, stake | best hand | jokers
+# joker stickers: [eternal] [perish N] [rental]  (N = rounds left)
+2026-08-10 00:14:22 | LOSE | 8FN3D2KL   | Ante 6  | Round 18 | The Hook               | Pts 111144/300000 (37.0%)      | Red Deck, White Stake | Best hand: 48200 | Hologram [eternal] x4.25, Supernova +51, Baron [perish 2] x1.5
+2026-08-10 00:14:22 | WIN  | AXQ91MZ7   | Ante 8  | Round 24 | Violet Vessel          | Pts 1523400/1200000 (127.0%)   | Blue Deck, Gold Stake | Best hand: 1523400 | Blueprint (holo) x12, Brainstorm [rental] x12, DNA
+2026-08-10 00:14:22 | LOSE | LMP4TT09   | Ante 3  | Round 8  | Small Blind            | Pts 612/1800 (34.0%)           | Ghost Deck, Blue Stake | Best hand: 612 | Joker +4
+2026-08-10 00:14:22 | LOSE | ZZ7KQW31   | Ante 8  | Round 25 | Big Blind              | Pts 9840000/15000000 (65.6%)   | Plasma Deck, Gold Stake | Best hand: 9840000 | Obelisk (negative) [eternal] [rental] x7.5, Hologram x18.75
+2026-08-10 00:14:22 | LOSE | C0DE1234   | Ante 7  | Round 21 | The Needle             | Pts 95300/280000 (34.0%)       | Anaglyph Deck, Black Stake | Best hand: 95300 | Cavendish [perish 1] x3, Bull +186 chips
