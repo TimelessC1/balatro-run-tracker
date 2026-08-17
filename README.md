@@ -96,4 +96,7 @@ asks for `GET /api/seeds/unbeaten?user_code=...`, expecting `{"seed":"XXXXXXXX"}
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+You can use, modify and redistribute this mod freely. If you publish a modified
+version, it has to stay under the GPL and its source has to be available too.
