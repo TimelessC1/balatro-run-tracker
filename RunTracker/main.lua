@@ -1189,7 +1189,51 @@ local function extract_seed(body)
     return nil
 end
 
-local function fetch_unbeaten_seed()
+--- Stake al azar entre los que tengas desbloqueados.
+--- get_deck_win_stake() devuelve el mas alto con el que has ganado; el juego
+--- te deja jugar el siguiente, asi que el tope es ese mas uno. Sin ninguna
+--- victoria, solo White.
+local function random_unlocked_stake()
+    local top = try(function() return get_deck_win_stake() end, 0) or 0
+    if type(top) ~= "number" then top = 0 end
+    top = math.max(1, math.min(8, top + 1))
+    return math.random(1, top), top
+end
+
+--- Mazo al azar entre los desbloqueados. Los bloqueados llevan
+--- unlocked = false en su definicion; el juego no te deja elegirlos y aqui
+--- tampoco.
+local function random_unlocked_deck()
+    local pool = {}
+    for _, v in ipairs((G.P_CENTER_POOLS and G.P_CENTER_POOLS.Back) or {}) do
+        if type(v) == "table" and v.unlocked ~= false then pool[#pool + 1] = v end
+    end
+    if #pool == 0 then return nil end
+    return pool[math.random(1, #pool)], #pool
+end
+
+--- start_run coge el mazo de G.GAME.viewed_back (game.lua:2057), que es lo
+--- que mueve la pantalla de seleccion. Se cambia igual que el propio menu.
+local function set_deck(center)
+    if not center then return nil end
+    if G.GAME.viewed_back and G.GAME.viewed_back.change_to then
+        G.GAME.viewed_back:change_to(center)
+    elseif type(Back) == "function" or type(Back) == "table" then
+        G.GAME.viewed_back = Back(center)
+    else
+        return nil
+    end
+    return center.name
+end
+
+--- Empezar una partida hay que hacerlo desde el menu principal. A mitad de
+--- una run, start_run abandonaria la que estas jugando sin avisar.
+local function can_start_run()
+    return G.STATES and G.STATE == G.STATES.MENU
+end
+
+--- action = "copy" copia al portapapeles; "play" arranca la partida.
+local function fetch_unbeaten_seed(action)
     local url = seed_url()
     if not url then
         SEED_UI.status = "No endpoint configured"
@@ -1218,10 +1262,30 @@ local function fetch_unbeaten_seed()
             SEED_UI.status = "No unbeaten seeds left"
             return
         end
+        log("unbeaten seed: " .. seed)
+
+        if action == "play" then
+            local stake, top = random_unlocked_stake()
+            local deck_name
+            local ok2 = pcall(function()
+                deck_name = set_deck((random_unlocked_deck()))
+                if G.OVERLAY_MENU then G.FUNCS.exit_overlay_menu() end
+                G.FUNCS.start_run(nil, { stake = stake, seed = seed })
+            end)
+            if ok2 then
+                SEED_UI.status = seed .. "  " .. (deck_name or "?") ..
+                                 ", stake " .. stake .. "/" .. top
+                log("random run: " .. seed .. " | " .. tostring(deck_name) ..
+                    " | stake " .. stake)
+            else
+                SEED_UI.status = "could not start the run"
+            end
+            return
+        end
+
         local copied = pcall(love.system.setClipboardText, seed)
         SEED_UI.status = copied and (seed .. " copied")
                                  or (seed .. " (clipboard failed)")
-        log("unbeaten seed: " .. seed)
     end
 
     local ok = pcall(function()
@@ -1238,7 +1302,18 @@ end
 G.FUNCS = G.FUNCS or {}
 
 G.FUNCS.runtrk_copy_seed = function()
-    pcall(fetch_unbeaten_seed)
+    pcall(fetch_unbeaten_seed, "copy")
+end
+
+--- Pide una seed que nadie haya ganado y arranca ahi, con un stake al azar
+--- de los desbloqueados. La partida queda marcada como seeded, que es lo que
+--- hace el juego siempre que le impones una seed.
+G.FUNCS.runtrk_play_seed = function()
+    if not can_start_run() then
+        SEED_UI.status = "only from the main menu"
+        return
+    end
+    pcall(fetch_unbeaten_seed, "play")
 end
 
 G.FUNCS.runtrk_copy_code = function()
@@ -1347,6 +1422,12 @@ MOD.config_tab = function()
                 UIBox_button({
                     label = { "Copy unbeaten seed" }, button = "runtrk_copy_seed",
                     colour = G.C.BLUE, minw = 3.4, minh = 0.55, scale = 0.32,
+                }),
+            }),
+            row({
+                UIBox_button({
+                    label = { "Play one (random deck & stake)" }, button = "runtrk_play_seed",
+                    colour = G.C.GREEN or G.C.BLUE, minw = 3.4, minh = 0.55, scale = 0.32,
                 }),
             }),
             -- El estado va en su propia fila: cambia de largo al pulsar el
