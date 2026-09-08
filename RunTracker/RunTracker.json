@@ -12,6 +12,6 @@
 	"version": "1.16.0",
 	"config_file": "config.lua",
 	"dependencies": [
-		"Steamodded (>=1.*)"
+		"Steamodded (>=1.0.0~)"
 	]
 }
