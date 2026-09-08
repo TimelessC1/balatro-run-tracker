@@ -104,10 +104,17 @@ local function esc_str(s)
     end))
 end
 
+--- Un numero, en texto, para el JSON.
+---
+--- Los enteros van con "%.0f" y no con "%d" a proposito. El "%d" de LuaJIT
+--- pasa el double por un entero de 32 bits, asi que cualquier puntuacion por
+--- encima de 4 294 967 296 daba la vuelta: una ronda de 17 008 070 538 681
+--- llego a la web como 46 521, que es justo ese numero modulo 2^32. El "%.0f"
+--- formatea el double tal cual y aguanta hasta 2^53 sin perder un digito.
 local function enc_number(n)
     if n ~= n or n == math.huge or n == -math.huge then return "null" end
     if n % 1 == 0 and math.abs(n) < 9007199254740992 then
-        return string.format("%d", n)
+        return string.format("%.0f", n)
     end
     return string.format("%.14g", n)
 end
@@ -388,8 +395,10 @@ local function ability_values(card)
     return any and out or nil
 end
 
+-- Mismo motivo que en enc_number: "%d" da la vuelta a los 32 bits y un joker
+-- con un x-mult enorme saldria con un numero absurdo en la etiqueta.
 local function fmt_num(v)
-    if v % 1 == 0 then return string.format("%d", v) end
+    if v % 1 == 0 then return string.format("%.0f", v) end
     return (string.format("%.4f", v):gsub("0+$", ""):gsub("%.$", ""))
 end
 
@@ -1021,7 +1030,7 @@ local TXT_HEADER =
 --- Puntuaciones enormes: 1234 -> "1234", 8.4e12 -> "8.4e+12".
 local function fmt_score(v)
     if type(v) ~= "number" or v ~= v then return "?" end
-    if math.abs(v) < 1e15 and v % 1 == 0 then return string.format("%d", v) end
+    if math.abs(v) < 1e15 and v % 1 == 0 then return string.format("%.0f", v) end
     return string.format("%.3g", v)
 end
 
