@@ -1879,6 +1879,21 @@ if CFG.track_money then
         end
     end
 
+    -- El alquiler de los jokers con sticker rental. Card:calculate_rental()
+    -- es una funcion dedicada (card.lua:2672) que cobra G.GAME.rental_rate
+    -- por cada uno al acabar la ronda, asi que la atribucion es exacta.
+    if type(Card) == "table" and type(Card.calculate_rental) == "function" then
+        local rental_ref = Card.calculate_rental
+        function Card:calculate_rental(...)
+            pcall(function()
+                if self.ability and self.ability.rental then
+                    money_add("spent_on", "rentals", G.GAME and G.GAME.rental_rate)
+                end
+            end)
+            return rental_ref(self, ...)
+        end
+    end
+
     if type(G.FUNCS.sell_card) == "function" then
         local sell_ref = G.FUNCS.sell_card
         G.FUNCS.sell_card = function(e, ...)
