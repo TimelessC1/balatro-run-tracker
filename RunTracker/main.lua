@@ -48,6 +48,10 @@ local CFG = {
     include_jokers = true,
     track_joker_values = true,
     only_vanilla_jokers = true,
+    -- Las partidas con mazos de otros mods se guardan en local pero no se suben.
+    only_vanilla_decks = true,
+    -- Contar de donde sale y a donde va el dinero de cada partida.
+    track_money = true,
     retry_pending_on_boot = true,
     debug = false,
 }
@@ -173,6 +177,107 @@ local function num(v)
     if v == nil then return nil end
     local ok, s = pcall(tostring, v)
     return ok and s or nil
+end
+
+--------------------------------------------------------------
+-- De donde sale y a donde va el dinero
+--------------------------------------------------------------
+
+-- No hay que adivinar el origen: el propio juego reparte el cobro de fin de
+-- ronda por categorias. Todas las filas que ves en el cash out pasan por
+-- add_round_eval_row({name = ..., dollars = ...}) y ese name es la categoria
+-- (blind, interest, hands, discards, joker, tag...).
+--
+-- Lo de fuera del cash out se coge en su sitio: ventas, compras y rerolls.
+--
+-- Y ease_dollars() es el paso obligado de CUALQUIER cambio de dinero, asi que
+-- de ahi sale el total real. Restandole las categorias queda un resto sin
+-- clasificar: si sale 0, la atribucion esta completa; si no, es que hay una
+-- fuente que no contemplamos. Prefiero publicar ese resto a fingir que no
+-- existe.
+local mny
+
+local function money_reset()
+    mny = { earned = 0, spent = 0, rerolls = 0, from = {}, spent_on = {} }
+end
+money_reset()
+
+local function money_add(bucket, key, amount)
+    if type(amount) ~= "number" or amount ~= amount or amount == 0 then return end
+    if amount == math.huge or amount == -math.huge then return end
+    local t = mny[bucket]
+    t[key] = (t[key] or 0) + amount
+end
+
+--- Lo que se manda: las categorias que tienen algo, mas el resto.
+local function money_summary()
+    if not CFG.track_money then return nil end
+    if mny.earned == 0 and mny.spent == 0 then return nil end
+
+    local classified = 0
+    local from = {}
+    for k, v in pairs(mny.from) do
+        if v ~= 0 then from[k] = v; classified = classified + v end
+    end
+    local spent_on = {}
+    for k, v in pairs(mny.spent_on) do
+        if v ~= 0 then spent_on[k] = v end
+    end
+
+    local rest = mny.earned - classified
+    if rest > 0.0001 or rest < -0.0001 then from.other = rest end
+
+    return {
+        earned   = mny.earned,
+        spent    = mny.spent,
+        rerolls  = mny.rerolls,
+        from     = next(from) and from or nil,
+        spent_on = next(spent_on) and spent_on or nil,
+    }
+end
+
+--------------------------------------------------------------
+-- Solo mazos del juego base
+--------------------------------------------------------------
+
+-- Misma idea que con los jokers, pero con otra consecuencia: una partida con
+-- un mazo de otro mod SI se guarda en local (txt y jsonl), solo que no se
+-- sube. En el ranking no tiene sentido comparar un mazo que los demas no
+-- pueden jugar, pero en tu historial si lo quieres.
+local VANILLA_DECKS = {}
+for _, k in ipairs({
+    "b_abandoned", "b_anaglyph", "b_black", "b_blue", "b_challenge",
+    "b_checkered", "b_erratic", "b_ghost", "b_green", "b_magic",
+    "b_nebula", "b_painted", "b_plasma", "b_red", "b_yellow", "b_zodiac"
+}) do VANILLA_DECKS[k] = true end
+
+--- Clave del mazo de la partida. selected_back_key guarda el center entero
+--- (game.lua:2087, via get_deck_from_name), no la clave suelta.
+local function deck_key()
+    local g = G.GAME or {}
+    local k = g.selected_back_key
+    if type(k) == "table" then k = k.key end
+    if type(k) ~= "string" then
+        k = try(function() return g.selected_back.effect.center.key end)
+    end
+    if type(k) ~= "string" then
+        -- Ultimo recurso: buscar el center por su nombre.
+        local name = try(function() return g.selected_back.name end)
+        if name then
+            k = try(function()
+                for key, v in pairs(G.P_CENTERS) do
+                    if v.set == "Back" and v.name == name then return key end
+                end
+            end)
+        end
+    end
+    return type(k) == "string" and k or nil
+end
+
+local function deck_is_vanilla()
+    local k = deck_key()
+    if not k then return true end        -- si no se puede saber, no se castiga
+    return VANILLA_DECKS[k] == true
 end
 
 --------------------------------------------------------------
@@ -337,6 +442,11 @@ local function record_effect(card, effect)
         if bucket and is_finite(v) then
             -- x1 y +0 no aportan informacion
             local neutral = (bucket == "x_mult" and v == 1) or (bucket ~= "x_mult" and v == 0)
+            -- Un joker que paga al puntuar (Golden Joker, Business Card...)
+            -- no pasa por el cash out, asi que se suma aqui.
+            if bucket == "dollars" and not neutral and CFG.track_money then
+                pcall(money_add, "from", "scoring_jokers", v)
+            end
             if not neutral then
                 local p = joker_peaks[id]
                 if not p then p = {}; joker_peaks[id] = p end
@@ -962,6 +1072,7 @@ local function build_payload(result)
         challenge    = g.challenge or nil,
         seeded       = g.seeded and true or false,
         jokers       = collect_jokers(),
+        money        = try(money_summary),
         game_version = try(function() return G.VERSION end),
         platform     = try(function() return love.system.getOS() end),
         player         = try(resolved_player_name),   -- "TimelessC1"
@@ -1592,6 +1703,14 @@ local function report(result)
     if CFG.always_log_local then append_file(LOG_FILE, body) end
     log("run finished: " .. result .. " -> " .. body, "debug")
 
+    -- Mazo de otro mod: queda guardado arriba, pero no se sube.
+    if CFG.only_vanilla_decks and not deck_is_vanilla() then
+        log("not uploaded: deck '" .. tostring(deck_key() or "?") ..
+            "' is not from the base game. The run is still in " ..
+            TXT_FILE .. " and " .. LOG_FILE)
+        return
+    end
+
     -- Modo local: sin endpoint no hay nada que enviar ni que encolar.
     if not CFG.enabled or CFG.endpoint == "" then
         log("NO ENDPOINT: the run was only saved to " .. TXT_FILE ..
@@ -1703,6 +1822,75 @@ if type(Card) == "table" and type(Card.add_to_deck) == "function" then
     end
 end
 
+-- 0c) Contadores de dinero.
+if CFG.track_money then
+    -- Total real de entradas y salidas: por aqui pasa todo.
+    if type(_G.ease_dollars) == "function" then
+        local ease_ref = _G.ease_dollars
+        _G.ease_dollars = function(mod, ...)
+            pcall(function()
+                if type(mod) == "number" and mod == mod then
+                    if mod > 0 then mny.earned = mny.earned + mod
+                    elseif mod < 0 then mny.spent = mny.spent - mod end
+                end
+            end)
+            return ease_ref(mod, ...)
+        end
+    end
+
+    -- El desglose del cobro de fin de ronda, con las categorias del juego.
+    if type(_G.add_round_eval_row) == "function" then
+        local row_ref = _G.add_round_eval_row
+        _G.add_round_eval_row = function(config, ...)
+            pcall(function()
+                local c = config or {}
+                local name = c.name
+                if type(name) == "string" and name ~= "bottom" and c.dollars then
+                    -- blind1, blind2... son la misma categoria.
+                    money_add("from", (name:gsub("%d+$", "")), c.dollars)
+                end
+            end)
+            return row_ref(config, ...)
+        end
+    end
+
+    -- Compras, rerolls y ventas.
+    if type(G.FUNCS.buy_from_shop) == "function" then
+        local buy_ref = G.FUNCS.buy_from_shop
+        G.FUNCS.buy_from_shop = function(e, ...)
+            pcall(function()
+                local c = e and e.config and e.config.ref_table
+                money_add("spent_on", "shop", c and c.cost)
+            end)
+            return buy_ref(e, ...)
+        end
+    end
+
+    if type(G.FUNCS.reroll_shop) == "function" then
+        local reroll_ref = G.FUNCS.reroll_shop
+        G.FUNCS.reroll_shop = function(...)
+            pcall(function()
+                local cost = G.GAME and G.GAME.current_round
+                             and G.GAME.current_round.reroll_cost
+                mny.rerolls = mny.rerolls + 1
+                money_add("spent_on", "rerolls", cost)
+            end)
+            return reroll_ref(...)
+        end
+    end
+
+    if type(G.FUNCS.sell_card) == "function" then
+        local sell_ref = G.FUNCS.sell_card
+        G.FUNCS.sell_card = function(e, ...)
+            pcall(function()
+                local c = e and e.config and e.config.ref_table
+                money_add("from", "sales", c and c.sell_cost)
+            end)
+            return sell_ref(e, ...)
+        end
+    end
+end
+
 -- NO USAR G.GAME.won PARA DECIDIR EL RESULTADO.
 -- Balatro tiene un bug en end_round(): al terminar la ronda de la ciega final
 -- pone won = true antes de comprobar si la has superado, asi que tambien se
@@ -1727,6 +1915,7 @@ local start_run_ref = Game.start_run
 function Game:start_run(args)
     local ret = start_run_ref(self, args)
     joker_peaks = {}
+    money_reset()
     modded_joker_seen = nil
     pcall(scan_jokers_for_mods)   -- partidas cargadas de un guardado
     -- Al cargar una partida ya ganada (modo infinito) no se vuelve a reportar.
