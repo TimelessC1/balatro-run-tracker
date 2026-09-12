@@ -1852,7 +1852,17 @@ if CFG.track_money then
                 local name = c.name
                 if type(name) == "string" and name ~= "bottom" and c.dollars then
                     -- blind1, blind2... son la misma categoria.
-                    money_add("from", (name:gsub("%d+$", "")), c.dollars)
+                    local cat = name:gsub("%d+$", "")
+                    -- La fila 'joker' la genera calculate_dollar_bonus, que
+                    -- tambien la disparan las cartas con mejora de oro que
+                    -- tienes en mano (state_events.lua:1024). El juego las
+                    -- mete en el mismo saco; aqui se separan mirando la carta
+                    -- que viene en la propia fila.
+                    if cat == "joker" and c.card and c.card.ability
+                       and c.card.ability.set ~= "Joker" then
+                        cat = "gold_cards"
+                    end
+                    money_add("from", cat, c.dollars)
                 end
             end)
             return row_ref(config, ...)
@@ -1881,6 +1891,31 @@ if CFG.track_money then
                 money_add("spent_on", "rerolls", cost)
             end)
             return reroll_ref(...)
+        end
+    end
+
+    -- Lo que paga una carta jugada: el sello dorado son $3, Lucky Card tira
+    -- el dado, y p_dollars es el resto. get_p_dollars consume numeros
+    -- aleatorios (la tirada de Lucky Card), asi que se llama UNA sola vez y
+    -- se reparte su resultado; volver a llamarla cambiaria la partida.
+    if type(Card) == "table" and type(Card.get_p_dollars) == "function" then
+        local pd_ref = Card.get_p_dollars
+        function Card:get_p_dollars(...)
+            local ret = pd_ref(self, ...)
+            pcall(function()
+                if type(ret) ~= "number" or ret <= 0 then return end
+                local rest = ret
+                -- Misma condicion que usa el juego para el sello (card.lua).
+                if self.seal == "Gold" and not self.ability.extra_enhancement then
+                    money_add("from", "gold_seals", 3)
+                    rest = rest - 3
+                end
+                if rest > 0 then
+                    money_add("from",
+                        self.lucky_trigger and "lucky_cards" or "cards", rest)
+                end
+            end)
+            return ret
         end
     end
 
