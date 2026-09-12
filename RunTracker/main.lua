@@ -1941,6 +1941,21 @@ if CFG.track_money then
         end
     end
 
+    -- Tags que pagan al usarlos y no en el cobro de fin de ronda: Speed,
+    -- Garbage, Handy y Economy llaman a ease_dollars desde Tag:apply_to_run
+    -- (tag.lua:175-205). El Investment Tag si va por el cash out, asi que
+    -- este hook no lo toca.
+    if type(Tag) == "table" and type(Tag.apply_to_run) == "function" then
+        local tag_ref = Tag.apply_to_run
+        function Tag:apply_to_run(...)
+            local prev = money_ctx
+            money_ctx = "tag"
+            local r = tag_ref(self, ...)
+            money_ctx = prev
+            return r
+        end
+    end
+
     -- Tarots y espectrales que dan dinero (Hermit, Temperance, Immolate).
     if type(Card) == "table" and type(Card.use_consumeable) == "function" then
         local uc_ref = Card.use_consumeable
