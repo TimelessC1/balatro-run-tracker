@@ -209,6 +209,11 @@ money_reset()
 -- Como no hay nada en el importe que diga de donde viene, se marca quien tiene
 -- el turno mientras dura la llamada y ease_dollars mira esa marca.
 local money_ctx = nil
+-- Contexto solo para el gasto. Hace falta aparte porque dentro de un descarte
+-- tambien COBRAN jokers (Faceless Joker, Mail-In Rebate, Trading Card): si se
+-- usara la misma marca para las dos direcciones, ese ingreso se etiquetaria
+-- como coste de descarte.
+local money_ctx_spend = nil
 
 local function money_add(bucket, key, amount)
     if type(amount) ~= "number" or amount ~= amount or amount == 0 then return end
@@ -1848,7 +1853,8 @@ if CFG.track_money then
                         if money_ctx then money_add("from", money_ctx, mod) end
                     elseif mod < 0 then
                         mny.spent = mny.spent - mod
-                        if money_ctx then money_add("spent_on", money_ctx, -mod) end
+                        local ctx = money_ctx_spend or money_ctx
+                        if ctx then money_add("spent_on", ctx, -mod) end
                     end
                 end
             end)
@@ -1904,6 +1910,20 @@ if CFG.track_money then
                 money_add("spent_on", "rerolls", cost)
             end)
             return reroll_ref(...)
+        end
+    end
+
+    -- Desafios que cobran por descartar (G.GAME.modifiers.discard_cost). El
+    -- cobro es sincrono dentro de discard_cards_from_highlighted
+    -- (state_events.lua:450), asi que basta con marcar la llamada.
+    if type(G.FUNCS.discard_cards_from_highlighted) == "function" then
+        local disc_ref = G.FUNCS.discard_cards_from_highlighted
+        G.FUNCS.discard_cards_from_highlighted = function(...)
+            local prev = money_ctx_spend
+            money_ctx_spend = "discard_cost"
+            local r = disc_ref(...)
+            money_ctx_spend = prev
+            return r
         end
     end
 
