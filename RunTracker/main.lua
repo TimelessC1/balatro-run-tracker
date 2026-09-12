@@ -1941,6 +1941,21 @@ if CFG.track_money then
         end
     end
 
+    -- Comprar un paquete (Card:open) y canjear un vale (Card:redeem) tienen
+    -- su propio ease_dollars(-self.cost) y no pasan por buy_from_shop.
+    for _, fn in ipairs({ "open", "redeem" }) do
+        if type(Card) == "table" and type(Card[fn]) == "function" then
+            local ref = Card[fn]
+            Card[fn] = function(self, ...)
+                local prev = money_ctx_spend
+                money_ctx_spend = "shop"
+                local a, b, c = ref(self, ...)
+                money_ctx_spend = prev
+                return a, b, c
+            end
+        end
+    end
+
     -- Tags que pagan al usarlos y no en el cobro de fin de ronda: Speed,
     -- Garbage, Handy y Economy llaman a ease_dollars desde Tag:apply_to_run
     -- (tag.lua:175-205). El Investment Tag si va por el cash out, asi que
