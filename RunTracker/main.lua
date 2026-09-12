@@ -219,13 +219,18 @@ local function money_summary()
     for k, v in pairs(mny.from) do
         if v ~= 0 then from[k] = v; classified = classified + v end
     end
+    local spent_classified = 0
     local spent_on = {}
     for k, v in pairs(mny.spent_on) do
-        if v ~= 0 then spent_on[k] = v end
+        if v ~= 0 then spent_on[k] = v; spent_classified = spent_classified + v end
     end
 
+    -- El mismo resto para las dos mitades. El del gasto tambien hace falta:
+    -- hay desafios que cobran por descartar, y sin esto no se veria.
     local rest = mny.earned - classified
     if rest > 0.0001 or rest < -0.0001 then from.other = rest end
+    local spent_rest = mny.spent - spent_classified
+    if spent_rest > 0.0001 or spent_rest < -0.0001 then spent_on.other = spent_rest end
 
     return {
         earned   = mny.earned,
