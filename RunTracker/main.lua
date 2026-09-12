@@ -202,6 +202,14 @@ local function money_reset()
 end
 money_reset()
 
+-- Hay cobros que no devuelven el dinero en su efecto: llaman a ease_dollars
+-- directamente desde dentro. Los jokers Matador, Trading Card, Mail-In Rebate,
+-- Faceless Joker y To Do List lo hacen dentro de Card:calculate_joker, y los
+-- consumibles The Hermit, Temperance e Immolate dentro de Card:use_consumeable.
+-- Como no hay nada en el importe que diga de donde viene, se marca quien tiene
+-- el turno mientras dura la llamada y ease_dollars mira esa marca.
+local money_ctx = nil
+
 local function money_add(bucket, key, amount)
     if type(amount) ~= "number" or amount ~= amount or amount == 0 then return end
     if amount == math.huge or amount == -math.huge then return end
@@ -1835,8 +1843,13 @@ if CFG.track_money then
         _G.ease_dollars = function(mod, ...)
             pcall(function()
                 if type(mod) == "number" and mod == mod then
-                    if mod > 0 then mny.earned = mny.earned + mod
-                    elseif mod < 0 then mny.spent = mny.spent - mod end
+                    if mod > 0 then
+                        mny.earned = mny.earned + mod
+                        if money_ctx then money_add("from", money_ctx, mod) end
+                    elseif mod < 0 then
+                        mny.spent = mny.spent - mod
+                        if money_ctx then money_add("spent_on", money_ctx, -mod) end
+                    end
                 end
             end)
             return ease_ref(mod, ...)
@@ -1891,6 +1904,32 @@ if CFG.track_money then
                 money_add("spent_on", "rerolls", cost)
             end)
             return reroll_ref(...)
+        end
+    end
+
+    -- Jokers que cobran llamando a ease_dollars desde dentro de su calculo.
+    if type(Card) == "table" and type(Card.calculate_joker) == "function" then
+        local cj_ref = Card.calculate_joker
+        function Card:calculate_joker(...)
+            -- Se guarda y se restaura en vez de poner a nil: Blueprint hace
+            -- que esta funcion se llame dentro de si misma.
+            local prev = money_ctx
+            money_ctx = "jokers_inplay"
+            local a, b, c = cj_ref(self, ...)
+            money_ctx = prev
+            return a, b, c
+        end
+    end
+
+    -- Tarots y espectrales que dan dinero (Hermit, Temperance, Immolate).
+    if type(Card) == "table" and type(Card.use_consumeable) == "function" then
+        local uc_ref = Card.use_consumeable
+        function Card:use_consumeable(...)
+            local prev = money_ctx
+            money_ctx = "consumables"
+            local r = uc_ref(self, ...)
+            money_ctx = prev
+            return r
         end
     end
 
