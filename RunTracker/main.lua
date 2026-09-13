@@ -1941,6 +1941,21 @@ if CFG.track_money then
         end
     end
 
+    -- Bosses que te quitan dinero. The Ox lo pone a cero al jugar tu mano mas
+    -- usada, con ease_dollars(-G.GAME.dollars) desde Blind:debuff_hand
+    -- (blind.lua:605). Se marca la funcion entera y no solo The Ox, para que
+    -- cualquier otro boss que cobre caiga tambien aqui.
+    if type(Blind) == "table" and type(Blind.debuff_hand) == "function" then
+        local debuff_ref = Blind.debuff_hand
+        function Blind:debuff_hand(...)
+            local prev = money_ctx_spend
+            money_ctx_spend = "boss"
+            local a, b, c = debuff_ref(self, ...)
+            money_ctx_spend = prev
+            return a, b, c
+        end
+    end
+
     -- Comprar un paquete (Card:open) y canjear un vale (Card:redeem) tienen
     -- su propio ease_dollars(-self.cost) y no pasan por buy_from_shop.
     for _, fn in ipairs({ "open", "redeem" }) do
