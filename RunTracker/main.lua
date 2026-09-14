@@ -1872,14 +1872,12 @@ if CFG.track_money then
                 if type(name) == "string" and name ~= "bottom" and c.dollars then
                     -- blind1, blind2... son la misma categoria.
                     local cat = name:gsub("%d+$", "")
-                    -- La fila 'joker' la genera calculate_dollar_bonus, que
-                    -- tambien la disparan las cartas con mejora de oro que
-                    -- tienes en mano (state_events.lua:1024). El juego las
-                    -- mete en el mismo saco; aqui se separan mirando la carta
-                    -- que viene en la propia fila.
+                    -- La fila 'joker' sale de calculate_dollar_bonus sobre
+                    -- G.jokers, G.consumeables y G.vouchers. Si alguna vez
+                    -- llega algo que no es un joker, se separa igual.
                     if cat == "joker" and c.card and c.card.ability
                        and c.card.ability.set ~= "Joker" then
-                        cat = "gold_cards"
+                        cat = "other_cards"
                     end
                     money_add("from", cat, c.dollars)
                 end
@@ -1938,6 +1936,24 @@ if CFG.track_money then
             local a, b, c = cj_ref(self, ...)
             money_ctx = prev
             return a, b, c
+        end
+    end
+
+    -- Cartas con mejora de oro que tienes en mano al acabar la ronda. NO van
+    -- por el cobro de fin de ronda: las dos listas que recorre evaluate_round
+    -- son jokers (G.jokers, consumeables, vouchers) y objetos individuales
+    -- (mazo, blind, desafio, stake, mods). Una carta de la mano no esta en
+    -- ninguna: paga por get_h_dollars, dentro de get_end_of_round_effect.
+    if type(Card) == "table" and type(Card.get_h_dollars) == "function" then
+        local hd_ref = Card.get_h_dollars
+        function Card:get_h_dollars(...)
+            local ret = hd_ref(self, ...)
+            pcall(function()
+                if type(ret) == "number" and ret > 0 then
+                    money_add("from", "gold_cards", ret)
+                end
+            end)
+            return ret
         end
     end
 
