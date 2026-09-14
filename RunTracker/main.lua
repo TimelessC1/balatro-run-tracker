@@ -215,6 +215,34 @@ local money_ctx = nil
 -- como coste de descarte.
 local money_ctx_spend = nil
 
+-- Algunos pagos no ocurren cuando se dispara su causa, sino en un callback
+-- que corre despues: los tags usan self:yep(..., function() ... end) y los
+-- tarots G.E_MANAGER:add_event con delay. Para entonces la marca de contexto
+-- ya se restauro, asi que hay que preguntar de otra forma: de que fichero del
+-- juego viene la llamada. El closure vive en el fichero donde se escribio,
+-- asi que esto funciona igual aunque se ejecute tres segundos despues.
+local SOURCE_CATS = {
+    ["tag.lua"]   = "tag",          -- Skip, Garbage, Handy, Economy
+    ["blind.lua"] = "boss",         -- The Ox
+    ["card.lua"]  = "consumables",  -- The Hermit, Temperance
+}
+
+--- Categoria segun quien llamo a ease_dollars. Nivel 3: esta funcion, el
+--- envoltorio de ease_dollars, y el que lo llamo de verdad.
+local function caller_category()
+    if type(debug) ~= "table" or type(debug.getinfo) ~= "function" then return nil end
+    -- Sin pcall: envolverlo mete un nivel mas en la pila y se acaba leyendo
+    -- el fichero equivocado. Un nivel que no existe devuelve nil, no error.
+    local info = debug.getinfo(3, "S")
+    local src = info and info.short_src
+    if type(src) ~= "string" then return nil end
+    src = src:gsub("\\", "/")
+    for file, cat in pairs(SOURCE_CATS) do
+        if src:sub(-#file) == file then return cat end
+    end
+    return nil
+end
+
 local function money_add(bucket, key, amount)
     if type(amount) ~= "number" or amount ~= amount or amount == 0 then return end
     if amount == math.huge or amount == -math.huge then return end
@@ -1846,14 +1874,18 @@ if CFG.track_money then
     if type(_G.ease_dollars) == "function" then
         local ease_ref = _G.ease_dollars
         _G.ease_dollars = function(mod, ...)
+            -- Fuera del pcall a proposito: caller_category cuenta niveles de
+            -- pila y meterla dentro de otra funcion los desplazaria.
+            local from_source = (not money_ctx) and caller_category() or nil
             pcall(function()
                 if type(mod) == "number" and mod == mod then
                     if mod > 0 then
                         mny.earned = mny.earned + mod
-                        if money_ctx then money_add("from", money_ctx, mod) end
+                        local ctx = money_ctx or from_source
+                        if ctx then money_add("from", ctx, mod) end
                     elseif mod < 0 then
                         mny.spent = mny.spent - mod
-                        local ctx = money_ctx_spend or money_ctx
+                        local ctx = money_ctx_spend or money_ctx or from_source
                         if ctx then money_add("spent_on", ctx, -mod) end
                     end
                 end
@@ -1943,14 +1975,21 @@ if CFG.track_money then
     -- por el cobro de fin de ronda: las dos listas que recorre evaluate_round
     -- son jokers (G.jokers, consumeables, vouchers) y objetos individuales
     -- (mazo, blind, desafio, stake, mods). Una carta de la mano no esta en
-    -- ninguna: paga por get_h_dollars, dentro de get_end_of_round_effect.
-    if type(Card) == "table" and type(Card.get_h_dollars) == "function" then
-        local hd_ref = Card.get_h_dollars
-        function Card:get_h_dollars(...)
-            local ret = hd_ref(self, ...)
+    -- ninguna.
+    --
+    -- Se engancha get_end_of_round_effect y NO get_h_dollars: ese getter lo
+    -- llama tambien generate_UIBox_ability_table (card.lua:906), o sea la
+    -- descripcion de la carta, asi que contaba $3 cada vez que se dibujaba
+    -- un tooltip. get_end_of_round_effect solo lo llama el recuento de fin
+    -- de ronda (common_events.lua:691).
+    if type(Card) == "table" and type(Card.get_end_of_round_effect) == "function" then
+        local eor_ref = Card.get_end_of_round_effect
+        function Card:get_end_of_round_effect(...)
+            local ret = eor_ref(self, ...)
             pcall(function()
-                if type(ret) == "number" and ret > 0 then
-                    money_add("from", "gold_cards", ret)
+                if type(ret) == "table" and type(ret.h_dollars) == "number"
+                   and ret.h_dollars > 0 then
+                    money_add("from", "gold_cards", ret.h_dollars)
                 end
             end)
             return ret
