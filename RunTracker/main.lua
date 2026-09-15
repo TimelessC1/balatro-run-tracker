@@ -2081,26 +2081,32 @@ if CFG.track_money then
     -- El alquiler de los jokers con sticker rental. Card:calculate_rental()
     -- es una funcion dedicada (card.lua:2672) que cobra G.GAME.rental_rate
     -- por cada uno al acabar la ronda, asi que la atribucion es exacta.
+    -- El alquiler tenia el mismo problema en potencia: paga con ease_dollars
+    -- desde card.lua, asi que sumarlo aqui lo habria duplicado en Gold Stake.
+    -- Tambien va por contexto.
     if type(Card) == "table" and type(Card.calculate_rental) == "function" then
         local rental_ref = Card.calculate_rental
         function Card:calculate_rental(...)
-            pcall(function()
-                if self.ability and self.ability.rental then
-                    money_add("spent_on", "rentals", G.GAME and G.GAME.rental_rate)
-                end
-            end)
-            return rental_ref(self, ...)
+            local prev = money_ctx_spend
+            money_ctx_spend = "rentals"
+            local a, b, c = rental_ref(self, ...)
+            money_ctx_spend = prev
+            return a, b, c
         end
     end
 
+    -- Vender: se marca el contexto y NO se suma aqui. Card:sell_card paga con
+    -- ease_dollars desde card.lua, asi que sumarlo tambien en este hook lo
+    -- contaba dos veces (y el fallback por fichero lo etiquetaba ademas como
+    -- consumible). Una sola fuente de verdad: ease_dollars.
     if type(G.FUNCS.sell_card) == "function" then
         local sell_ref = G.FUNCS.sell_card
-        G.FUNCS.sell_card = function(e, ...)
-            pcall(function()
-                local c = e and e.config and e.config.ref_table
-                money_add("from", "sales", c and c.sell_cost)
-            end)
-            return sell_ref(e, ...)
+        G.FUNCS.sell_card = function(...)
+            local prev = money_ctx
+            money_ctx = "sales"
+            local a, b, c = sell_ref(...)
+            money_ctx = prev
+            return a, b, c
         end
     end
 end
