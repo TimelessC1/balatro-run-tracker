@@ -1098,6 +1098,9 @@ local function build_payload(result)
         best_hand    = num(try(function() return g.round_scores.hand.amt end)),
         deck         = try(function() return g.selected_back.name end)
                        or try(function() return g.selected_back_key end),
+        -- El nombre del mazo llega traducido si juegas en otro idioma; la
+        -- clave no. La web se queda con la clave para agrupar.
+        deck_key     = try(deck_key),
         stake          = num(g.stake),
         stake_level    = stake.level,     -- 1..8
         stake_key      = stake.key,       -- "stake_green"
