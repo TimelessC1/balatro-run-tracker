@@ -1948,25 +1948,33 @@ if CFG.track_money then
     -- Compras, rerolls y ventas.
     if type(G.FUNCS.buy_from_shop) == "function" then
         local buy_ref = G.FUNCS.buy_from_shop
-        G.FUNCS.buy_from_shop = function(e, ...)
-            pcall(function()
-                local c = e and e.config and e.config.ref_table
-                money_add("spent_on", "shop", c and c.cost)
-            end)
-            return buy_ref(e, ...)
+        -- Solo marca el contexto. Contar aqui el coste ademas de dejarlo pasar
+        -- por ease_dollars duplicaba las compras que ya tienen su propia via:
+        -- un paquete pasa por aqui Y por Card:open, que tambien descuenta.
+        G.FUNCS.buy_from_shop = function(...)
+            local prev = money_ctx_spend
+            money_ctx_spend = "shop"
+            local a, b, c = buy_ref(...)
+            money_ctx_spend = prev
+            return a, b, c
         end
     end
 
     if type(G.FUNCS.reroll_shop) == "function" then
         local reroll_ref = G.FUNCS.reroll_shop
         G.FUNCS.reroll_shop = function(...)
+            -- El numero de rerolls si se cuenta aqui: es un recuento, no
+            -- dinero. El importe lo pone ease_dollars, que ademas acierta con
+            -- los rerolls gratis (Chaos the Clown, D6 Tag): ahi no se cobra
+            -- nada y leer reroll_cost habria sumado igual.
             pcall(function()
-                local cost = G.GAME and G.GAME.current_round
-                             and G.GAME.current_round.reroll_cost
                 local m = mny(); if m then m.rerolls = m.rerolls + 1 end
-                money_add("spent_on", "rerolls", cost)
             end)
-            return reroll_ref(...)
+            local prev = money_ctx_spend
+            money_ctx_spend = "rerolls"
+            local a, b, c = reroll_ref(...)
+            money_ctx_spend = prev
+            return a, b, c
         end
     end
 
