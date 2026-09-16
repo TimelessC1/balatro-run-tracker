@@ -195,12 +195,32 @@ end
 -- clasificar: si sale 0, la atribucion esta completa; si no, es que hay una
 -- fuente que no contemplamos. Prefiero publicar ese resto a fingir que no
 -- existe.
-local mny
-
-local function money_reset()
-    mny = { earned = 0, spent = 0, rerolls = 0, from = {}, spent_on = {} }
+-- Los contadores viven DENTRO de G.GAME, no en una variable del mod.
+--
+-- save_run() guarda la partida con GAME = G.GAME entero (misc_functions.lua
+-- :1611), asi que todo lo que cuelgue de ahi se guarda y se recupera solo. Si
+-- se guardaran aparte, cerrar el juego a mitad de una partida y continuarla
+-- despues perderia todo el dinero contado hasta ese momento: la partida
+-- subiria con earned = 0 y solo lo que pasara despues de cargar.
+--
+-- Una partida nueva trae G.GAME limpio, asi que la tabla se crea vacia sola.
+local function mny()
+    local g = G.GAME
+    if type(g) ~= "table" then return nil end
+    local t = g.runtrk_money
+    if type(t) ~= "table" then
+        t = { earned = 0, spent = 0, rerolls = 0, from = {}, spent_on = {} }
+        g.runtrk_money = t
+    end
+    -- Un guardado viejo puede no traerla entera, y recursive_table_cull se
+    -- lleva por delante las tablas vacias.
+    t.earned  = tonumber(t.earned)  or 0
+    t.spent   = tonumber(t.spent)   or 0
+    t.rerolls = tonumber(t.rerolls) or 0
+    if type(t.from)     ~= "table" then t.from = {} end
+    if type(t.spent_on) ~= "table" then t.spent_on = {} end
+    return t
 end
-money_reset()
 
 -- Hay cobros que no devuelven el dinero en su efecto: llaman a ease_dollars
 -- directamente desde dentro. Los jokers Matador, Trading Card, Mail-In Rebate,
@@ -246,37 +266,40 @@ end
 local function money_add(bucket, key, amount)
     if type(amount) ~= "number" or amount ~= amount or amount == 0 then return end
     if amount == math.huge or amount == -math.huge then return end
-    local t = mny[bucket]
+    local m = mny(); if not m then return end
+    local t = m[bucket]
     t[key] = (t[key] or 0) + amount
 end
 
 --- Lo que se manda: las categorias que tienen algo, mas el resto.
 local function money_summary()
     if not CFG.track_money then return nil end
-    if mny.earned == 0 and mny.spent == 0 then return nil end
+    local m = mny()
+    if not m then return nil end
+    if m.earned == 0 and m.spent == 0 then return nil end
 
     local classified = 0
     local from = {}
-    for k, v in pairs(mny.from) do
+    for k, v in pairs(m.from) do
         if v ~= 0 then from[k] = v; classified = classified + v end
     end
     local spent_classified = 0
     local spent_on = {}
-    for k, v in pairs(mny.spent_on) do
+    for k, v in pairs(m.spent_on) do
         if v ~= 0 then spent_on[k] = v; spent_classified = spent_classified + v end
     end
 
     -- El mismo resto para las dos mitades. El del gasto tambien hace falta:
     -- hay desafios que cobran por descartar, y sin esto no se veria.
-    local rest = mny.earned - classified
+    local rest = m.earned - classified
     if rest > 0.0001 or rest < -0.0001 then from.other = rest end
-    local spent_rest = mny.spent - spent_classified
+    local spent_rest = m.spent - spent_classified
     if spent_rest > 0.0001 or spent_rest < -0.0001 then spent_on.other = spent_rest end
 
     return {
-        earned   = mny.earned,
-        spent    = mny.spent,
-        rerolls  = mny.rerolls,
+        earned   = m.earned,
+        spent    = m.spent,
+        rerolls  = m.rerolls,
         from     = next(from) and from or nil,
         spent_on = next(spent_on) and spent_on or nil,
     }
@@ -1882,12 +1905,13 @@ if CFG.track_money then
             local from_source = (not money_ctx) and caller_category() or nil
             pcall(function()
                 if type(mod) == "number" and mod == mod then
+                    local m = mny(); if not m then return end
                     if mod > 0 then
-                        mny.earned = mny.earned + mod
+                        m.earned = m.earned + mod
                         local ctx = money_ctx or from_source
                         if ctx then money_add("from", ctx, mod) end
                     elseif mod < 0 then
-                        mny.spent = mny.spent - mod
+                        m.spent = m.spent - mod
                         local ctx = money_ctx_spend or money_ctx or from_source
                         if ctx then money_add("spent_on", ctx, -mod) end
                     end
@@ -1939,7 +1963,7 @@ if CFG.track_money then
             pcall(function()
                 local cost = G.GAME and G.GAME.current_round
                              and G.GAME.current_round.reroll_cost
-                mny.rerolls = mny.rerolls + 1
+                local m = mny(); if m then m.rerolls = m.rerolls + 1 end
                 money_add("spent_on", "rerolls", cost)
             end)
             return reroll_ref(...)
@@ -2138,7 +2162,6 @@ local start_run_ref = Game.start_run
 function Game:start_run(args)
     local ret = start_run_ref(self, args)
     joker_peaks = {}
-    money_reset()
     modded_joker_seen = nil
     pcall(scan_jokers_for_mods)   -- partidas cargadas de un guardado
     -- Al cargar una partida ya ganada (modo infinito) no se vuelve a reportar.
