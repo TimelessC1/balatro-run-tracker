@@ -235,16 +235,19 @@ local money_ctx = nil
 -- como coste de descarte.
 local money_ctx_spend = nil
 
--- Algunos pagos no ocurren cuando se dispara su causa, sino en un callback
--- que corre despues: los tags usan self:yep(..., function() ... end) y los
--- tarots G.E_MANAGER:add_event con delay. Para entonces la marca de contexto
--- ya se restauro, asi que hay que preguntar de otra forma: de que fichero del
--- juego viene la llamada. El closure vive en el fichero donde se escribio,
+-- Ultimo recurso para un pago que llega sin marca de contexto: de que fichero
+-- del juego viene la llamada. El closure vive en el fichero donde se escribio,
 -- asi que esto funciona igual aunque se ejecute tres segundos despues.
+--
+-- Solo valen los ficheros que hacen UNA cosa. card.lua estuvo aqui como
+-- "consumables" y era falso: ahi dentro estan tambien Card:calculate_joker
+-- (Faceless Joker), Card:sell_card y Card:open, asi que todo lo que se pagara
+-- con retraso desde card.lua acababa contado como consumible. Ahora los pagos
+-- diferidos se llevan su marca puesta (ver el envoltorio de Event mas abajo),
+-- y lo que siga sin marca es mas honesto que salga en "other".
 local SOURCE_CATS = {
     ["tag.lua"]   = "tag",          -- Skip, Garbage, Handy, Economy
     ["blind.lua"] = "boss",         -- The Ox
-    ["card.lua"]  = "consumables",  -- The Hermit, Temperance
 }
 
 --- Categoria segun quien llamo a ease_dollars. Nivel 3: esta funcion, el
@@ -1896,6 +1899,50 @@ end
 
 -- 0c) Contadores de dinero.
 if CFG.track_money then
+    -- Casi nada se cobra en el momento. El juego encola el trabajo con
+    -- G.E_MANAGER:add_event(Event({func = ...})) y ese func corre frames
+    -- despues, cuando la marca de contexto ya se restauro. Entonces el pago
+    -- llegaba a ease_dollars sin dueño y se adivinaba por el fichero, que es
+    -- justo donde fallaba:
+    --
+    --   * Faceless Joker encola su ease_dollars (card.lua:3305), asi que el
+    --     cobro caia en card.lua y salia como "consumables".
+    --   * Comprar en la tienda mete TODA la compra dentro de un evento
+    --     (button_callbacks.lua:2453) y el ease_dollars(-coste) esta ahi
+    --     dentro (:2510). button_callbacks.lua no estaba en la lista, asi que
+    --     el gasto entero salia como "other".
+    --
+    -- La marca se pone al CREAR el evento, que es cuando todavia se sabe
+    -- quien lo pidio, y se repone mientras corre su func. Se envuelve Event
+    -- y no EventManager:add_event porque el evento se construye antes de
+    -- encolarse, y asi tambien quedan cubiertos los que se guardan para
+    -- despues. Solo se envuelve si hay algo que recordar: lo demas pasa de
+    -- largo, que esto se llama miles de veces por partida.
+    if type(Event) == "table" and type(Event.init) == "function" then
+        local ev_init = Event.init
+        function Event:init(config, ...)
+            ev_init(self, config, ...)
+            local ctx, spend = money_ctx, money_ctx_spend
+            if (ctx or spend) and type(self.func) == "function" then
+                local fn = self.func
+                self.func = function(...)
+                    -- Se guarda y se repone en vez de limpiar: un evento
+                    -- puede crear otro, y el de fuera tiene que recuperar
+                    -- la suya al volver.
+                    local prev, prev_spend = money_ctx, money_ctx_spend
+                    money_ctx, money_ctx_spend = ctx, spend
+                    -- pcall para que un fallo del juego no deje la marca
+                    -- puesta y contamine todo lo que venga detras. El error
+                    -- se vuelve a lanzar tal cual: aqui no se tapa nada.
+                    local ok, a, b, c = pcall(fn, ...)
+                    money_ctx, money_ctx_spend = prev, prev_spend
+                    if not ok then error(a, 0) end
+                    return a, b, c
+                end
+            end
+        end
+    end
+
     -- Total real de entradas y salidas: por aqui pasa todo.
     if type(_G.ease_dollars) == "function" then
         local ease_ref = _G.ease_dollars
@@ -1973,6 +2020,23 @@ if CFG.track_money then
             local prev = money_ctx_spend
             money_ctx_spend = "rerolls"
             local a, b, c = reroll_ref(...)
+            money_ctx_spend = prev
+            return a, b, c
+        end
+    end
+
+    -- Cambiar el boss con Director's Cut o Retcon cuesta $10 y se paga desde
+    -- button_callbacks.lua, que no es de nadie: sin esto el gasto salia en
+    -- "other". Va aparte de "rerolls", que son los de la tienda: no se paga
+    -- en el mismo sitio ni por lo mismo. El juego no cobra si el cambio lo
+    -- regala el Boss Tag (G.from_boss_tag), y como el importe lo pone
+    -- ease_dollars, esos salen a 0 solos.
+    if type(G.FUNCS.reroll_boss) == "function" then
+        local rb_ref = G.FUNCS.reroll_boss
+        G.FUNCS.reroll_boss = function(...)
+            local prev = money_ctx_spend
+            money_ctx_spend = "boss_reroll"
+            local a, b, c = rb_ref(...)
             money_ctx_spend = prev
             return a, b, c
         end

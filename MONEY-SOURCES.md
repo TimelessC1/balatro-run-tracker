@@ -98,8 +98,14 @@ haya acumulado (el Egg suma +$3 por ronda a su valor de venta). Categoría
 |---|---|---|
 | Comprar en la tienda | jokers, consumibles, vales y paquetes | `shop` |
 | Rerolls | coste creciente dentro de cada tienda | `rerolls` |
+| Cambiar el boss | $10, con Director's Cut o Retcon | `boss_reroll` |
 | Alquiler (sticker rental) | $3 por ronda y por joker | `rentals` |
 | Coste por descarte | solo en algunos desafíos | `discard_cost` |
+| The Ox (boss) | te deja a cero al jugar tu mano más usada | `boss` |
+| The Tooth (boss) | $1 por carta jugada | `boss` |
+
+El **Boss Tag** regala el cambio de boss: ahí el juego no cobra, y como el
+importe lo pone `ease_dollars`, sale $0 solo.
 
 **Descuentos**: Clearance Sale deja la tienda al 75%, Liquidation al 50%.
 **Rerolls más baratos**: Reroll Surplus y Reroll Glut restan $2 cada uno; el
@@ -107,6 +113,32 @@ D6 Tag deja la primera tienda con rerolls a $0; Chaos the Clown da un reroll
 gratis por tienda.
 
 **Credit Card** no es un gasto: permite que tu dinero baje hasta −$20.
+
+---
+
+## Cómo se sabe de dónde viene cada pago
+
+Tres vías, por orden de fiabilidad:
+
+1. **El propio juego lo dice.** Todas las filas del cash out pasan por
+   `add_round_eval_row({name = ..., dollars = ...})` y ese `name` ya es la
+   categoría (blind, interest, hands, discards, joker, tag).
+2. **La marca de contexto.** Antes de llamar a lo que va a cobrar se apunta
+   quién tiene el turno (`Card:calculate_joker` → `jokers_inplay`,
+   `Card:use_consumeable` → `consumables`, `G.FUNCS.buy_from_shop` → `shop`…)
+   y `ease_dollars` la lee.
+3. **El fichero que llamó**, con `debug.getinfo`. Solo para `tag.lua` y
+   `blind.lua`, que hacen una cosa cada uno.
+
+**Casi nada se cobra en el momento.** El juego encola el trabajo con
+`G.E_MANAGER:add_event(Event({func = ...}))` y ese `func` corre frames después,
+cuando la marca ya se restauró. Por eso se envuelve `Event:init`: al **crear**
+el evento todavía se sabe quién lo pidió, así que la marca se guarda ahí y se
+repone mientras corre su `func`.
+
+`card.lua` estuvo en la lista del punto 3 como `consumables`, y era falso: ahí
+dentro están también `Card:calculate_joker`, `Card:sell_card` y `Card:open`.
+Se quitó.
 
 ---
 
