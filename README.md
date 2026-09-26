@@ -64,12 +64,30 @@ The mod writes these to your Balatro save folder:
 |------|------------|
 | `run_tracker_results.txt` | One readable line per run (see `example_results.txt`) |
 | `run_tracker_log.jsonl` | The raw payload of every run, as a backup |
+| `run_tracker_log_<name>.jsonl` | Only while you keep an extra log open (see below) |
 | `run_tracker_pending.jsonl` | Runs whose upload failed; retried on next launch |
 | `run_tracker_identity.txt` | Your user code and name tag |
 
 A failed upload is never lost: it is queued and retried when you next start the
 game. Requests the server actively rejects are not retried, but the raw payload
 is still in `run_tracker_log.jsonl`.
+
+## Extra logs
+
+Want to measure just October, or a challenge, or a streak? In
+**Mods > Run Tracker > Config**, type a name under **Extra log** and press
+**Start**. From then on every finished run is written twice: to the usual
+`run_tracker_log.jsonl` *and* to `run_tracker_log_<your name>.jsonl`.
+
+Press **Stop** to close it. The file stays where it is, holding exactly the
+runs you played while it was open — drop it into the **My stats** tab of the
+site to see that period on its own.
+
+The main log always records everything, whatever you do with the extra ones.
+Spaces in the name become underscores, so "October streak" gives you
+`run_tracker_log_October_streak.jsonl`. You can keep up to 8 open at once; if
+more than one is open, type its name before pressing Stop. Open logs survive
+closing the game.
 
 ## Running your own server
 
@@ -85,8 +103,7 @@ return {
 Any value you leave out falls back to the default in `main.lua`. The file is
 optional and is not shipped with the mod.
 
-The endpoint receives a `POST` with a JSON body per run, and the seed button
-asks for `GET /api/seeds/unbeaten?user_code=...`, expecting `{"seed":"XXXXXXXX"}`.
+The endpoint receives a `POST` with a JSON body per run.
 
 ## Requirements
 

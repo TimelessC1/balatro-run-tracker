@@ -52,6 +52,12 @@ local CFG = {
     only_vanilla_decks = true,
     -- Contar de donde sale y a donde va el dinero de cada partida.
     track_money = true,
+    -- Apuntar cada joker que pasa por tu fila y cuantas rondas se queda.
+    track_joker_history = true,
+    -- Nivel y veces jugada de cada mano de poker. Es una sola lectura de
+    -- G.GAME.hands al cerrar la partida: el juego ya lleva la cuenta, aqui
+    -- no se cuenta nada durante la run.
+    track_hands = true,
     retry_pending_on_boot = true,
     debug = false,
 }
@@ -493,6 +499,159 @@ local function stickers_desc(j)
     return " " .. table.concat(out, " ")
 end
 
+--------------------------------------------------------------
+-- Cuantas rondas aguanta cada joker
+--------------------------------------------------------------
+--
+-- La pregunta es "que jokers pasaron por mi fila y cuanto duraron". Se podria
+-- enganchar Card:add_to_deck y Card:remove_from_deck, que es lo que suena
+-- natural, y es un error: el juego los llama de mas.
+--
+--   * Card:set_ability hace remove + add por su cuenta (card.lua:255 y :483)
+--     cada vez que una carta cambia de habilidad, sin que nadie la haya
+--     comprado ni vendido.
+--   * Debufar y desdebufar una fila llama a los dos con from_debuff (:717,
+--     :722), asi que cada ciega jefe pareceria vender y recomprar todo.
+--
+-- Asi que no se escucha: se mira. Cada frame se pasa por G.jokers.cards y se
+-- apunta quien esta; cuando el contador de rondas cambia, a todos los que
+-- estan se les suma una. "Rondas que aguanto" acaba siendo literalmente eso,
+-- las rondas en las que estaba, y da igual como entrara —comprado, de un
+-- paquete, creado por Wraith o Riff-raff— y como saliera —vendido, muerto o
+-- agotado—.
+--
+-- Vive en G.GAME, que save_run() serializa entero, asi que cerrar el juego a
+-- mitad de partida no pierde la cuenta.
+
+--- Identidad de una carta. sort_id es el contador que Balatro asigna a cada
+--- carta creada (card.lua:24) y se guarda y restaura con la partida (:5110,
+--- :5212). Se le pega la clave del joker porque ese contador NO se restaura
+--- al cargar —solo lo hace cada carta— y dos cartas podrian acabar con el
+--- mismo numero; con la clave delante, dos jokers distintos no se mezclan.
+local function joker_hist_uid(card)
+    local key = try(function() return card.config.center.key end) or "?"
+    return tostring(card.sort_id or card.ID or card) .. ":" .. tostring(key)
+end
+
+--- El registro dentro de G.GAME, creado vacio en cuanto hace falta.
+local function jhist()
+    local g = G.GAME
+    if type(g) ~= "table" then return nil end
+    local t = g.runtrk_jokers
+    if type(t) ~= "table" then
+        t = { seen = {}, last_round = -1, n = 0 }
+        g.runtrk_jokers = t
+    end
+    if type(t.seen) ~= "table" then t.seen = {} end
+    t.last_round = tonumber(t.last_round) or -1
+    -- Cuantas altas van. Es lo que da el orden de compra, y tiene que vivir
+    -- aqui dentro: contarlo por fuera lo perderia al cargar la partida.
+    t.n = tonumber(t.n) or 0
+    return t
+end
+
+--- Una pasada por la fila. Es idempotente dentro de la misma ronda, asi que
+--- llamarla cada frame no cuenta de mas: el alta se hace una vez por carta y
+--- la suma de rondas solo cuando el contador de rondas se mueve.
+local function sweep_jokers()
+    if not CFG.track_joker_history then return end
+    local area = G.jokers
+    if type(area) ~= "table" or type(area.cards) ~= "table" then return end
+    local t = jhist(); if not t then return end
+
+    local round = tonumber(G.GAME.round) or 0
+    local nueva = round ~= t.last_round
+
+    for _, c in ipairs(area.cards) do
+        if type(c) == "table" and try(function() return c.ability.set end) == "Joker" then
+            local uid = joker_hist_uid(c)
+            local e = t.seen[uid]
+            if not e then
+                -- Alta en cuanto aparece, no al cambiar de ronda: un joker
+                -- comprado y revendido en la misma tienda no llega a ninguna
+                -- ronda, pero paso por la fila y tiene que constar.
+                -- Si aparece con la ciega en juego, esa ronda ya cuenta: los
+                -- jokers de la tienda entran entre rondas y no deben llevarse
+                -- la que todavia no han jugado, pero uno creado a mitad de
+                -- mano (Seance, un paquete abierto en plena ronda) si estuvo
+                -- ahi. G.GAME.blind.in_blind es justo esa diferencia
+                -- (blind.lua:184, state_events.lua:95), y se guarda con la
+                -- partida.
+                --
+                -- El "and not nueva" evita contar esa ronda dos veces: si el
+                -- alta cae en el mismo frame en que el contador avanza, la
+                -- suma de abajo ya se la da.
+                local jugando = try(function() return G.GAME.blind.in_blind end) and true or false
+                t.n = t.n + 1
+                e = {
+                    key   = try(function() return c.config.center.key end),
+                    name  = try(function() return c.ability.name end),
+                    from  = round,      -- contador de rondas al aparecer
+                    rounds = (jugando and not nueva) and 1 or 0,
+                    ord   = t.n,        -- el orden en que fueron llegando
+                }
+                t.seen[uid] = e
+            end
+            if nueva then e.rounds = (tonumber(e.rounds) or 0) + 1 end
+        end
+    end
+
+    if nueva then t.last_round = round end
+end
+
+--- Lo que se manda: una entrada por joker que haya pasado por la fila, en el
+--- orden en que fueron llegando. Dos copias del mismo joker van por separado,
+--- que es lo que se quiere saber.
+---
+--- El orden importa y no se puede reconstruir en el otro lado: ni por rondas
+--- —dos jokers comprados en la misma tienda empatan— ni por la ronda de alta,
+--- por lo mismo. Asi que viaja ya ordenado.
+---
+--- Y cada entrada dice si esa carta sigue en la fila. Tambien hay que decirlo
+--- desde aqui: en la lista que se manda solo van clave, nombre y rondas, asi
+--- que con dos Baron y uno vendido el otro lado no tiene con que saber cual de
+--- los dos se quedo. Aqui si, comparando la carta misma.
+local function joker_history()
+    if not CFG.track_joker_history then return nil end
+    local t = jhist(); if not t then return nil end
+
+    -- Los que siguen en la fila ahora mismo, por identidad de carta.
+    local vivos = {}
+    local area = G.jokers
+    if type(area) == "table" and type(area.cards) == "table" then
+        for _, c in ipairs(area.cards) do
+            if type(c) == "table" and try(function() return c.ability.set end) == "Joker" then
+                vivos[joker_hist_uid(c)] = true
+            end
+        end
+    end
+
+    local out = {}
+    for uid, e in pairs(t.seen) do
+        if e.key or e.name then
+            out[#out + 1] = {
+                key    = e.key,
+                name   = e.name,
+                rounds = tonumber(e.rounds) or 0,
+                from   = tonumber(e.from),
+                kept   = vivos[uid] or nil,   -- nil y no false: no ocupa sitio
+                ord    = tonumber(e.ord) or 0,
+            }
+        end
+    end
+    if #out == 0 then return nil end
+    -- Los de un guardado viejo no traen ord: van al final, por nombre, en vez
+    -- de colarse todos al principio empatados a cero.
+    table.sort(out, function(a, b)
+        if (a.ord > 0) ~= (b.ord > 0) then return a.ord > 0 end
+        if a.ord ~= b.ord then return a.ord < b.ord end
+        return tostring(a.name) < tostring(b.name)
+    end)
+    -- ord ya no hace falta fuera: el orden esta en la lista.
+    for _, e in ipairs(out) do e.ord = nil end
+    return out
+end
+
 --- Maximo que ha llegado a dar cada joker durante la partida.
 --- Clave: el sort_id que Balatro asigna a cada carta, asi dos copias del
 --- mismo joker se cuentan por separado.
@@ -677,6 +836,52 @@ local function scan_jokers_for_mods()
     end
 end
 
+-- Las doce manos de poker, en el orden en que las ensena el juego (handlist
+-- de globals.lua): de la mejor a la peor. Se fija aqui y no se saca de
+-- G.GAME.hands porque una tabla de Lua no tiene orden.
+local HANDLIST = {
+    "Flush Five", "Flush House", "Five of a Kind", "Straight Flush",
+    "Four of a Kind", "Full House", "Flush", "Straight",
+    "Three of a Kind", "Two Pair", "Pair", "High Card",
+}
+
+-- Nivel y veces jugada de cada mano al cerrar la partida.
+--
+-- El juego ya lleva esta cuenta el solo en G.GAME.hands, asi que no hay nada
+-- que ir contando durante la run: se lee entera de una vez al final.
+--
+-- Se guarda tambien "visible": las tres manos secretas (Flush Five, Flush
+-- House, Five of a Kind) no existen para el jugador hasta que las descubre, y
+-- en el cuadro del juego salen como ??? . Sin ese dato la web no podria
+-- distinguir "nivel 1, nunca jugada" de "ni sabias que existia".
+--
+-- Los niveles son los del FINAL de la partida, no un historico: se sabe a que
+-- nivel llego cada mano, no cuando subio.
+local function collect_hands()
+    if not CFG.track_hands then return nil end
+    local hands = G.GAME and G.GAME.hands
+    if type(hands) ~= "table" then return nil end
+    local out = {}
+    local alguna = false
+    for _, name in ipairs(HANDLIST) do
+        local h = hands[name]
+        if type(h) == "table" then
+            out[name] = {
+                level   = num(h.level),
+                played  = num(h.played),
+                chips   = num(h.chips),
+                mult    = num(h.mult),
+                visible = h.visible and true or false,
+            }
+            alguna = true
+        end
+    end
+    -- Sin ninguna mano no se manda la clave: mejor que no venga a que venga
+    -- un objeto vacio que la web tenga que distinguir de "no medido".
+    if not alguna then return nil end
+    return out
+end
+
 local function collect_jokers()
     local out = array({})
     if not CFG.include_jokers then return out end
@@ -773,6 +978,10 @@ if type(UI.user_code)   ~= "string" then UI.user_code   = "" end
 if type(UI.user_tag)    ~= "string" then UI.user_tag    = "" end
 if type(UI.upload)      ~= "boolean" then UI.upload      = true end
 if type(UI.notice_seen) ~= "boolean" then UI.notice_seen = false end
+-- Los cuadernos abiertos. Se filtra al cargar porque esto viaja en un .jkr
+-- que se puede editar a mano, y un nombre raro aqui acabaria siendo un
+-- nombre de fichero raro.
+if type(UI.extra_logs) ~= "table" then UI.extra_logs = {} end
 
 --- SteamID64 en crudo. Se lee aunque send_steam_id este desactivado: el
 --- codigo de usuario es un hash y el ID en si no sale de tu maquina.
@@ -1148,6 +1357,9 @@ local function build_payload(result)
         seeded       = g.seeded and true or false,
         jokers       = collect_jokers(),
         money        = try(money_summary),
+        -- Cada joker que paso por la fila y cuantas rondas aguanto.
+        joker_history = try(joker_history),
+        hands        = try(collect_hands),
         game_version = try(function() return G.VERSION end),
         platform     = try(function() return love.system.getOS() end),
         player         = try(resolved_player_name),   -- "TimelessC1"
@@ -1170,6 +1382,61 @@ local function append_file(file, line)
     pcall(function()
         love.filesystem.append(file, line .. "\n")
     end)
+end
+
+--------------------------------------------------------------
+-- Cuadernos: logs extra, temporales, ademas del de siempre
+--------------------------------------------------------------
+--
+-- La idea: "quiero medir mis partidas de octubre". Abres un cuaderno
+-- llamado "Desafio Octubre" y a partir de ahi cada partida que acabes se
+-- escribe DOS veces, en run_tracker_log.jsonl y en
+-- run_tracker_log_Desafio_Octubre.jsonl. Cuando el mes acaba, lo cierras y
+-- te queda ese fichero con justo esas partidas, listo para cargarlo en la
+-- pestana "My stats" de la web.
+--
+-- El log general nunca se toca: sigue llevandolo todo, pase lo que pase con
+-- los cuadernos. Y cerrar uno no borra nada, solo deja de escribir en el.
+
+--- Tope de cuadernos a la vez. No hay razon para tener treinta, y cada uno
+--- es una escritura mas por partida.
+local MAX_EXTRA_LOGS = 8
+
+--- El nombre que escribe el jugador se convierte en parte de un nombre de
+--- fichero, asi que no puede pasar tal cual: los espacios se vuelven guiones
+--- bajos y lo que no sea letra, cifra, guion o guion bajo se cae. Sin esto,
+--- un "Octubre/2026" o un "..\\..\\algo" escribirian donde no deben.
+---
+--- Devuelve nil si no queda nada aprovechable.
+local function clean_label(s)
+    if type(s) ~= "string" then return nil end
+    s = s:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", "_")
+    -- Byte a byte, no por patron de clase: los acentos son multibyte en UTF-8
+    -- y %w no los reconoce, asi que se quedarian a medias.
+    s = s:gsub("[^%w_%-]", "")
+    s = s:gsub("_+", "_"):gsub("^[_%-]+", ""):gsub("[_%-]+$", "")
+    if s == "" then return nil end
+    return s:sub(1, 40)
+end
+
+--- run_tracker_log_Desafio_Octubre.jsonl. Mismo prefijo y misma extension
+--- que el log general a proposito: se ordenan juntos en la carpeta y la web
+--- los reconoce igual.
+local function extra_log_file(label)
+    return "run_tracker_log_" .. label .. ".jsonl"
+end
+
+--- Los cuadernos abiertos, ya limpios y sin repetidos.
+local function extra_logs()
+    local out, seen = {}, {}
+    for _, v in ipairs(UI.extra_logs or {}) do
+        local c = clean_label(v)
+        if c and not seen[c:lower()] then
+            seen[c:lower()] = true
+            out[#out + 1] = c
+        end
+    end
+    return out
 end
 
 --- Tope para que un servidor caido no llene el disco de partidas pendientes.
@@ -1352,163 +1619,98 @@ do
 end
 
 --------------------------------------------------------------
--- Seeds pendientes (boton "copiar seed no ganada")
+-- Estado de la pestana de configuracion
 --------------------------------------------------------------
 
---- La URL se deriva del endpoint: si envias a .../run o a .../api/run, las
---- seeds se piden a .../api/seeds/unbeaten. Asi solo hay un campo que
---- configurar. Va bajo /api/ porque en el Worker todo lo que no empieza por
---- ahi lo sirve el binding de assets, y contestaria con la pagina web.
-local function seed_url()
-    local ep = CFG.endpoint
-    if type(ep) ~= "string" or ep == "" then return nil end
-    local base = ep:gsub("%s+$", ""):gsub("/+$", "")
-                   :gsub("/api/run$", ""):gsub("/run$", "")
-    return base .. "/api/seeds/unbeaten"
-end
+--- Lo que se lee bajo los controles. Nunca vacio: un G.UIT.T sin texto se
+--- queda sin ancho y el nodo desaparece.
+local SEED_UI = { status = "Run Tracker is ready", code = "" }
 
---- Estado que pinta la pestana de config. Nunca vacio: un G.UIT.T sin texto
---- se queda sin ancho y el nodo desaparece.
-local SEED_UI = { status = "Press the button for a seed", code = "" }
+--- Lo que se escribe en el cuadro de los cuadernos, y la linea que dice en
+--- que se esta grabando ahora mismo.
+local EXTRA_UI = { name = "", list = "" }
 
---- Acepta {"seed":"8FN3D2KL"} o la seed sola en texto plano.
-local function extract_seed(body)
-    if type(body) ~= "string" then return nil end
-    -- Si la ruta no existe, el Worker devuelve la pagina web entera. No se
-    -- busca dentro de un HTML: cualquier "seed":"..." suelto en su javascript
-    -- pasaria por una seed de verdad.
-    if body:match("^%s*<") then return nil end
-    local s = body:match('"seed"%s*:%s*"([^"]+)"')
-    if not s then s = body:match("^%s*([%w]+)%s*$") end
-    if s and #s >= 4 and #s <= 12 then return s:upper() end
-    return nil
-end
-
---- Stake al azar entre los que tengas desbloqueados.
---- get_deck_win_stake() devuelve el mas alto con el que has ganado; el juego
---- te deja jugar el siguiente, asi que el tope es ese mas uno. Sin ninguna
---- victoria, solo White.
-local function random_unlocked_stake()
-    local top = try(function() return get_deck_win_stake() end, 0) or 0
-    if type(top) ~= "number" then top = 0 end
-    top = math.max(1, math.min(8, top + 1))
-    return math.random(1, top), top
-end
-
---- Mazo al azar entre los desbloqueados. Los bloqueados llevan
---- unlocked = false en su definicion; el juego no te deja elegirlos y aqui
---- tampoco.
-local function random_unlocked_deck()
-    local pool = {}
-    for _, v in ipairs((G.P_CENTER_POOLS and G.P_CENTER_POOLS.Back) or {}) do
-        if type(v) == "table" and v.unlocked ~= false then pool[#pool + 1] = v end
-    end
-    if #pool == 0 then return nil end
-    return pool[math.random(1, #pool)], #pool
-end
-
---- start_run coge el mazo de G.GAME.viewed_back (game.lua:2057), que es lo
---- que mueve la pantalla de seleccion. Se cambia igual que el propio menu.
-local function set_deck(center)
-    if not center then return nil end
-    if G.GAME.viewed_back and G.GAME.viewed_back.change_to then
-        G.GAME.viewed_back:change_to(center)
-    elseif type(Back) == "function" or type(Back) == "table" then
-        G.GAME.viewed_back = Back(center)
+--- Repinta la linea de estado. Es texto dinamico (dyn_txt), asi que cambiarlo
+--- aqui se ve sin tener que rehacer la pestana.
+local function refresh_extra_list()
+    local open = extra_logs()
+    if #open == 0 then
+        EXTRA_UI.list = "Recording to the main log only"
     else
-        return nil
+        EXTRA_UI.list = "Also recording to: " .. table.concat(open, ", ")
     end
-    return center.name
-end
-
---- Empezar una partida hay que hacerlo desde el menu principal. A mitad de
---- una run, start_run abandonaria la que estas jugando sin avisar.
-local function can_start_run()
-    return G.STATES and G.STATE == G.STATES.MENU
-end
-
---- action = "copy" copia al portapapeles; "play" arranca la partida.
-local function fetch_unbeaten_seed(action)
-    local url = seed_url()
-    if not url then
-        SEED_UI.status = "No endpoint configured"
-        return
-    end
-    if not https then
-        SEED_UI.status = "https module not available"
-        return
-    end
-
-    SEED_UI.status = "Looking..."
-    local headers = {}
-    if CFG.token ~= "" then headers["Authorization"] = "Bearer " .. CFG.token end
-    -- Se manda el codigo para que el servidor pueda saltarse las que tu ya
-    -- has ganado, no solo las que no ha ganado nadie.
-    local full = url .. "?user_code=" .. tostring(try(resolved_user_code, ""))
-    local opts = { method = "GET", headers = headers }
-
-    local function done(code, body)
-        if not (type(code) == "number" and code >= 200 and code < 300) then
-            SEED_UI.status = "Error " .. tostring(code)
-            return
-        end
-        local seed = extract_seed(body)
-        if not seed then
-            SEED_UI.status = "No unbeaten seeds left"
-            return
-        end
-        log("unbeaten seed: " .. seed)
-
-        if action == "play" then
-            local stake, top = random_unlocked_stake()
-            local deck_name
-            local ok2 = pcall(function()
-                deck_name = set_deck((random_unlocked_deck()))
-                if G.OVERLAY_MENU then G.FUNCS.exit_overlay_menu() end
-                G.FUNCS.start_run(nil, { stake = stake, seed = seed })
-            end)
-            if ok2 then
-                SEED_UI.status = seed .. "  " .. (deck_name or "?") ..
-                                 ", stake " .. stake .. "/" .. top
-                log("random run: " .. seed .. " | " .. tostring(deck_name) ..
-                    " | stake " .. stake)
-            else
-                SEED_UI.status = "could not start the run"
-            end
-            return
-        end
-
-        local copied = pcall(love.system.setClipboardText, seed)
-        SEED_UI.status = copied and (seed .. " copied")
-                                 or (seed .. " (clipboard failed)")
-    end
-
-    local ok = pcall(function()
-        if https.asyncRequest then
-            https.asyncRequest(full, opts, function(c, b) pcall(done, c, b) end)
-        else
-            local c, b = https.request(full, opts)
-            done(c, b)
-        end
-    end)
-    if not ok then SEED_UI.status = "Request failed" end
 end
 
 G.FUNCS = G.FUNCS or {}
 
-G.FUNCS.runtrk_copy_seed = function()
-    pcall(fetch_unbeaten_seed, "copy")
-end
-
---- Pide una seed que nadie haya ganado y arranca ahi, con un stake al azar
---- de los desbloqueados. La partida queda marcada como seeded, que es lo que
---- hace el juego siempre que le impones una seed.
-G.FUNCS.runtrk_play_seed = function()
-    if not can_start_run() then
-        SEED_UI.status = "only from the main menu"
+--- Abrir un cuaderno. El nombre sale del cuadro de texto; si esta vacio o no
+--- queda nada despues de limpiarlo, se dice y no se toca nada.
+G.FUNCS.runtrk_extra_start = function()
+    local label = clean_label(EXTRA_UI.name)
+    if not label then
+        SEED_UI.status = "Type a name first"
         return
     end
-    pcall(fetch_unbeaten_seed, "play")
+
+    local open = extra_logs()
+    for _, v in ipairs(open) do
+        if v:lower() == label:lower() then
+            SEED_UI.status = label .. " is already open"
+            return
+        end
+    end
+    if #open >= MAX_EXTRA_LOGS then
+        SEED_UI.status = "Too many open (max " .. MAX_EXTRA_LOGS .. ")"
+        return
+    end
+
+    open[#open + 1] = label
+    UI.extra_logs = open
+    pcall(SMODS.save_mod_config, MOD)
+    refresh_extra_list()
+    EXTRA_UI.name = ""
+    -- El fichero no se crea aqui: nace con la primera partida que acabes. Asi
+    -- abrir un cuaderno y arrepentirse no deja un fichero vacio tirado.
+    SEED_UI.status = "Recording to " .. extra_log_file(label)
+    log("extra log opened: " .. extra_log_file(label))
+end
+
+--- Cerrar un cuaderno. Con uno solo abierto no hace falta escribir nada: se
+--- cierra ese. Con varios hay que decir cual, que es la contrapartida de
+--- poder tener varios a la vez.
+G.FUNCS.runtrk_extra_stop = function()
+    local open = extra_logs()
+    if #open == 0 then
+        SEED_UI.status = "No extra log is open"
+        return
+    end
+
+    local label = clean_label(EXTRA_UI.name)
+    if not label then
+        if #open > 1 then
+            SEED_UI.status = "Type which one to stop"
+            return
+        end
+        label = open[1]
+    end
+
+    local rest, found = {}, nil
+    for _, v in ipairs(open) do
+        if v:lower() == label:lower() then found = v else rest[#rest + 1] = v end
+    end
+    if not found then
+        SEED_UI.status = label .. " is not open"
+        return
+    end
+
+    UI.extra_logs = rest
+    pcall(SMODS.save_mod_config, MOD)
+    refresh_extra_list()
+    EXTRA_UI.name = ""
+    -- Cerrarlo solo deja de escribir: el fichero se queda donde esta, con
+    -- todo lo que llevaba dentro.
+    SEED_UI.status = "Stopped " .. found .. " (file kept)"
+    log("extra log closed: " .. extra_log_file(found))
 end
 
 G.FUNCS.runtrk_copy_code = function()
@@ -1558,6 +1760,9 @@ MOD.config_tab = function()
     local code = try(resolved_user_code, "?")
     local tag  = try(resolved_user_tag, "????")
     SEED_UI.code = code
+    -- Al abrir la pestana, que la linea de cuadernos diga la verdad de ahora:
+    -- puede haberse abierto uno en otra sesion.
+    refresh_extra_list()
     local persona = steam_persona()
     -- El nombre que saldria si dejas el cuadro vacio.
     local auto = (persona or profile_name() or "Anonymous") .. "#" .. tag
@@ -1613,18 +1818,33 @@ MOD.config_tab = function()
                 }),
             }),
 
+            -- Cuadernos. Un cuadro y dos botones: el mismo nombre sirve para
+            -- abrir y para cerrar. Se hace asi, y no con una fila por
+            -- cuaderno abierto con su boton, porque la pestana se construye
+            -- una sola vez al abrirla: anadir y quitar filas obligaria a
+            -- rehacerla entera cada vez que pulsas.
+            row({ txt("Extra log", 0.3, G.C.UI.TEXT_INACTIVE) }),
             row({
+                create_text_input({
+                    id          = "runtrk_extra",
+                    ref_table   = EXTRA_UI,
+                    ref_value   = "name",
+                    w           = 3.2,
+                    h           = 0.6,
+                    max_length  = 40,
+                    prompt_text = "Run streak",
+                }),
                 UIBox_button({
-                    label = { "Copy unbeaten seed" }, button = "runtrk_copy_seed",
-                    colour = G.C.BLUE, minw = 3.4, minh = 0.55, scale = 0.32,
+                    label = { "Start" }, button = "runtrk_extra_start",
+                    colour = G.C.BLUE, minw = 1.5, minh = 0.5, scale = 0.3,
+                }),
+                UIBox_button({
+                    label = { "Stop" }, button = "runtrk_extra_stop",
+                    colour = G.C.GREY, minw = 1.5, minh = 0.5, scale = 0.3,
                 }),
             }),
-            row({
-                UIBox_button({
-                    label = { "Play one (random deck & stake)" }, button = "runtrk_play_seed",
-                    colour = G.C.GREEN or G.C.BLUE, minw = 3.4, minh = 0.55, scale = 0.32,
-                }),
-            }),
+            row({ dyn_txt(EXTRA_UI, "list", 0.26) }),
+
             -- El estado va en su propia fila: cambia de largo al pulsar el
             -- boton, y al lado de otra cosa la desplazaria cada vez.
             row({ dyn_txt(SEED_UI, "status", 0.28) }),
@@ -1775,7 +1995,19 @@ local function report(result)
         return
     end
 
-    if CFG.always_log_local then append_file(LOG_FILE, body) end
+    if CFG.always_log_local then
+        append_file(LOG_FILE, body)
+        -- Y una copia en cada cuaderno abierto. La misma linea exacta, para
+        -- que cualquiera de los ficheros se pueda cargar en la web igual que
+        -- el general.
+        local cuadernos = extra_logs()
+        for _, label in ipairs(cuadernos) do
+            append_file(extra_log_file(label), body)
+        end
+        if #cuadernos > 0 then
+            log("also written to: " .. table.concat(cuadernos, ", "))
+        end
+    end
     log("run finished: " .. result .. " -> " .. body, "debug")
 
     -- Mazo de otro mod: queda guardado arriba, pero no se sube.
@@ -2248,6 +2480,10 @@ local update_ref = Game.update
 function Game:update(dt)
     local ret = update_ref(self, dt)
     pcall(function()
+        -- Antes que nada, la pasada por la fila de jokers: es lo unico que hay
+        -- que hacer todos los frames, y hacerla aqui la deja tambien cubierta
+        -- por este pcall.
+        sweep_jokers()
         if G.STATE ~= last_state then
             last_state = G.STATE
             log("state -> " .. state_name(G.STATE), "debug")
@@ -2307,7 +2543,11 @@ local function boot_diagnostics()
     add("#   user code            : " .. tostring(try(resolved_user_code, "?")) ..
         " (" .. tostring(UI.user_code_source ~= "" and UI.user_code_source or "?") .. ")")
     add("#   identity file        : " .. tostring(identity_path() or "?"))
-    add("#   unbeaten seeds at    : " .. tostring(seed_url() or "no endpoint"))
+    do
+        local open = extra_logs()
+        add("#   extra logs           : " ..
+            (#open > 0 and table.concat(open, ", ") or "none"))
+    end
     add("#   endpoint             : " .. (CFG.endpoint ~= "" and CFG.endpoint or "NOT CONFIGURED"))
     if ENDPOINT_WARNING then
         add("#   WARNING              : " .. ENDPOINT_WARNING)

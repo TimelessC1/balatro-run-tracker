@@ -36,6 +36,15 @@ return {
     -- Si ya se ha enseñado el aviso de la primera vez. Ponlo en false para
     -- volver a verlo.
     notice_seen = false,
+
+    -- Cuadernos abiertos. Cada nombre de esta lista es un fichero extra
+    -- run_tracker_log_<nombre>.jsonl donde se copia cada partida que acabas,
+    -- ademas del log de siempre. Sirve para medir un mes, un desafio o una
+    -- racha sin tener que separarlo despues a mano.
+    --
+    -- Se llena desde el juego (Mods > Run Tracker > Config), no hace falta
+    -- tocarlo aqui. Vacio = solo se graba el log general.
+    extra_logs = {},
 }
 
 -- OJO: la copia buena de user_code y user_tag no es esta, es
