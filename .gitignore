@@ -7,6 +7,13 @@ run_tracker_results.txt
 run_tracker_log.jsonl
 run_tracker_pending.jsonl
 run_tracker_identity.txt
+# Y los cuadernos: run_tracker_log_<nombre>.jsonl, con el nombre que elijas.
+run_tracker_log_*.jsonl
+
+# Cache de wrangler. Aparece si se lanza wrangler desde esta carpeta por
+# error, y lleva dentro el id y el nombre de la cuenta de Cloudflare: nada
+# que deba acabar en un repo publico.
+.wrangler/
 
 # Paquetes generados
 *.zip

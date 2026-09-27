@@ -54,6 +54,10 @@ local CFG = {
     track_money = true,
     -- Apuntar cada joker que pasa por tu fila y cuantas rondas se queda.
     track_joker_history = true,
+    -- Apuntar, ronda a ronda, lo que pedia la ciega y lo que sacaste.
+    track_rounds = true,
+    -- Apuntar los vales que canjeas, en orden.
+    track_vouchers = true,
     -- Nivel y veces jugada de cada mano de poker. Es una sola lectura de
     -- G.GAME.hands al cerrar la partida: el juego ya lleva la cuenta, aqui
     -- no se cuenta nada durante la run.
@@ -497,6 +501,160 @@ local function stickers_desc(j)
         out[#out + 1] = "[" .. label .. "]"
     end
     return " " .. table.concat(out, " ")
+end
+
+--------------------------------------------------------------
+-- Los vales canjeados
+--------------------------------------------------------------
+--
+-- El juego ya lleva una lista, G.GAME.used_vouchers, pero no sirve para esto
+-- por dos razones: es un conjunto, sin orden ni ante, y mete tambien los que
+-- REGALA el mazo (back.lua:227 y :289 la escriben directamente). El Zodiac
+-- Deck, por ejemplo, arranca con tres puestos, y esos no los compraste.
+--
+-- Asi que se apunta al canjear. Card:redeem() es el paso obligado de los que
+-- eliges tu —la tienda y el Voucher Tag— y no lo pisan los del mazo, que
+-- escriben la tabla sin pasar por ahi.
+
+local function vhist()
+    local g = G.GAME
+    if type(g) ~= "table" then return nil end
+    local t = g.runtrk_vouchers
+    if type(t) ~= "table" then
+        t = { list = {} }
+        g.runtrk_vouchers = t
+    end
+    if type(t.list) ~= "table" then t.list = {} end
+    return t
+end
+
+--- Apunta un vale. Se llama desde el envoltorio de Card:redeem, antes de
+--- dejarlo pasar: shop_voucher y from_tag son banderas de la carta y el propio
+--- redeem las usa y las limpia (card.lua:2153-2154).
+local function note_voucher(card)
+    if not CFG.track_vouchers then return end
+    if try(function() return card.ability.set end) ~= "Voucher" then return end
+    local t = vhist(); if not t then return end
+    for _, e in ipairs(t.list) do
+        -- Un vale no se puede canjear dos veces, pero si el evento se
+        -- reintentara no se duplica.
+        if e.key and e.key == card.config.center_key then return end
+    end
+    t.list[#t.list + 1] = {
+        key  = try(function() return card.config.center_key end),
+        name = try(function() return card.ability.name end),
+        ante = tonumber(try(function() return G.GAME.round_resets.ante end)),
+        from = try(function() return card.from_tag end) and "tag" or "shop",
+    }
+end
+
+--- Lo que se manda, en el orden en que los canjeaste.
+local function voucher_history()
+    if not CFG.track_vouchers then return nil end
+    local t = vhist(); if not t then return nil end
+    if #t.list == 0 then return nil end
+    local out = {}
+    for _, e in ipairs(t.list) do
+        if e.key or e.name then
+            out[#out + 1] = { key = e.key, name = e.name, ante = e.ante, from = e.from }
+        end
+    end
+    return #out > 0 and out or nil
+end
+
+--------------------------------------------------------------
+-- Lo que pedia cada ronda y lo que sacaste
+--------------------------------------------------------------
+--
+-- Una lista en orden, con dos clases de entrada:
+--
+--   ciega jugada:   { round = 7, ante = 3, blind = "The Hook", need = 4000, got = 6300 }
+--   ciega saltada:  { ante = 3, blind = "Big Blind", skip = true, tag = "Investment Tag" }
+--
+-- Van en la misma lista porque el orden en que pasaron es el dato: un salto
+-- entre dos rondas tiene que dibujarse entre ellas.
+--
+-- Y hacen falta dos vias distintas para llenarla, porque **saltar una ciega no
+-- avanza el contador de rondas**: ease_round(1) se llama solo desde
+-- G.FUNCS.select_blind (button_callbacks.lua:2574). O sea que una ciega
+-- saltada no tiene numero de ronda, y si se guardara indexando por ronda
+-- desapareceria. De ahi que esto sea una lista y no una tabla por ronda.
+--
+--   * Las jugadas, mirando cada frame: el pedido es G.GAME.blind.chips y lo
+--     conseguido G.GAME.chips.
+--   * Los saltos, enganchando G.FUNCS.skip_blind.
+
+--- El registro dentro de G.GAME.
+local function rhist()
+    local g = G.GAME
+    if type(g) ~= "table" then return nil end
+    local t = g.runtrk_rounds
+    if type(t) ~= "table" then
+        t = { list = {} }
+        g.runtrk_rounds = t
+    end
+    if type(t.list) ~= "table" then t.list = {} end
+    return t
+end
+
+--- El nombre de la ciega que toca en un hueco ("Small", "Big", "Boss").
+--- round_resets.blind_choices guarda la clave y G.P_BLINDS el nombre
+--- (UI_definitions.lua:1631).
+local function blind_slot_name(slot)
+    local key = try(function() return G.GAME.round_resets.blind_choices[slot] end)
+    if type(key) ~= "string" then return slot end
+    return try(function() return G.P_BLINDS[key].name end) or slot
+end
+
+--- Una pasada por la ronda en curso. Como con los jokers, es idempotente:
+--- llamarla cada frame solo mueve el maximo conseguido.
+local function sweep_round()
+    if not CFG.track_rounds then return end
+    local blind = G.GAME and G.GAME.blind
+    if type(blind) ~= "table" or not blind.in_blind then return end
+    local t = rhist(); if not t then return end
+
+    local round = tonumber(G.GAME.round) or 0
+    local got   = tonumber(G.GAME.chips) or 0
+    local last  = t.list[#t.list]
+
+    if not (last and not last.skip and last.round == round) then
+        t.list[#t.list + 1] = {
+            round = round,
+            ante  = tonumber(try(function() return G.GAME.round_resets.ante end)),
+            blind = try(function() return blind.name end),
+            need  = tonumber(try(function() return blind.chips end)),
+            got   = got,
+        }
+        return
+    end
+
+    -- El contador de puntos se anima al subir (ease_chips, un Event de tipo
+    -- 'ease'), asi que un frame cualquiera lo pilla a medio camino. Se guarda
+    -- el maximo de la ronda, que es el valor de verdad. Ya nos paso una vez
+    -- leer el numero equivocado por no hacer esto.
+    if got > (tonumber(last.got) or 0) then last.got = got end
+    -- El requisito puede cambiar a mitad de ronda (The Wall y compania ajustan
+    -- al entrar), asi que se refresca.
+    local need = tonumber(try(function() return blind.chips end))
+    if need then last.need = need end
+end
+
+--- Lo que se manda: la lista tal cual, que ya esta en orden.
+local function round_history()
+    if not CFG.track_rounds then return nil end
+    local t = rhist(); if not t then return nil end
+    if #t.list == 0 then return nil end
+    local out = {}
+    for _, e in ipairs(t.list) do
+        if e.skip then
+            out[#out + 1] = { skip = true, ante = e.ante, blind = e.blind, tag = e.tag }
+        else
+            out[#out + 1] = { round = e.round, ante = e.ante, blind = e.blind,
+                              need = e.need, got = e.got }
+        end
+    end
+    return out
 end
 
 --------------------------------------------------------------
@@ -1359,6 +1517,10 @@ local function build_payload(result)
         money        = try(money_summary),
         -- Cada joker que paso por la fila y cuantas rondas aguanto.
         joker_history = try(joker_history),
+        -- Lo que pedia cada ronda y lo que sacaste, con los saltos en su sitio.
+        rounds = try(round_history),
+        -- Los vales que canjeaste, en orden.
+        vouchers = try(voucher_history),
         hands        = try(collect_hands),
         game_version = try(function() return G.VERSION end),
         platform     = try(function() return love.system.getOS() end),
@@ -1642,6 +1804,33 @@ local function refresh_extra_list()
 end
 
 G.FUNCS = G.FUNCS or {}
+
+-- Saltar una ciega. Se anota ANTES de dejar pasar la llamada, porque el propio
+-- skip_blind mueve G.GAME.blind_on_deck al hueco siguiente
+-- (button_callbacks.lua:2808): despues ya no se sabria cual se salto.
+--
+-- No avanza el contador de rondas, asi que esto es la unica forma de que el
+-- salto conste. La etiqueta que te llevas sale del mismo sitio del que la saca
+-- el juego, el tag_container del boton (:2800).
+if CFG.track_rounds and type(G.FUNCS.skip_blind) == "function" then
+    local skip_ref = G.FUNCS.skip_blind
+    G.FUNCS.skip_blind = function(e, ...)
+        pcall(function()
+            local t = rhist(); if not t then return end
+            local slot = G.GAME.blind_on_deck or "Small"
+            local tag = try(function()
+                return e.UIBox:get_UIE_by_ID("tag_container").config.ref_table.name
+            end)
+            t.list[#t.list + 1] = {
+                skip  = true,
+                ante  = tonumber(try(function() return G.GAME.round_resets.ante end)),
+                blind = blind_slot_name(slot),
+                tag   = tag,
+            }
+        end)
+        return skip_ref(e, ...)
+    end
+end
 
 --- Abrir un cuaderno. El nombre sale del cuadro de texto; si esta vacio o no
 --- queda nada despues de limpiarlo, se dice y no se toca nada.
@@ -2129,6 +2318,21 @@ if type(Card) == "table" and type(Card.add_to_deck) == "function" then
     end
 end
 
+-- 0b) Los vales canjeados. Va en su propio envoltorio y no colgado del de
+-- Card:redeem que pone el contexto del dinero: si no, apagar track_money
+-- apagaria tambien los vales, que no tienen nada que ver.
+--
+-- Se apunta ANTES de dejar pasar la llamada porque redeem consume las banderas
+-- que dicen de donde venia el vale (card.lua:2153-2154): despues ya no se
+-- sabria si salio de la tienda o de una etiqueta.
+if CFG.track_vouchers and type(Card) == "table" and type(Card.redeem) == "function" then
+    local redeem_ref = Card.redeem
+    function Card:redeem(...)
+        pcall(note_voucher, self)
+        return redeem_ref(self, ...)
+    end
+end
+
 -- 0c) Contadores de dinero.
 if CFG.track_money then
     -- Casi nada se cobra en el momento. El juego encola el trabajo con
@@ -2344,6 +2548,7 @@ if CFG.track_money then
 
     -- Comprar un paquete (Card:open) y canjear un vale (Card:redeem) tienen
     -- su propio ease_dollars(-self.cost) y no pasan por buy_from_shop.
+    --
     for _, fn in ipairs({ "open", "redeem" }) do
         if type(Card) == "table" and type(Card[fn]) == "function" then
             local ref = Card[fn]
@@ -2484,6 +2689,7 @@ function Game:update(dt)
         -- que hacer todos los frames, y hacerla aqui la deja tambien cubierta
         -- por este pcall.
         sweep_jokers()
+        sweep_round()
         if G.STATE ~= last_state then
             last_state = G.STATE
             log("state -> " .. state_name(G.STATE), "debug")
