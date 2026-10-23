@@ -62,6 +62,12 @@ local CFG = {
     -- G.GAME.hands al cerrar la partida: el juego ya lleva la cuenta, aqui
     -- no se cuenta nada durante la run.
     track_hands = true,
+    -- El mazo al terminar, carta por carta, y lo que hicieron las de cristal
+    -- y las de la suerte. Casi todo es una lectura al cerrar: el juego ya
+    -- cuenta las veces que se jugo cada carta (base.times_played). Lo unico
+    -- que hay que vigilar durante la partida son los disparos de las lucky,
+    -- que no quedan apuntados en ningun sitio.
+    track_deck = true,
     retry_pending_on_boot = true,
     debug = false,
 }
@@ -561,6 +567,163 @@ local function voucher_history()
     end
     return #out > 0 and out or nil
 end
+
+--------------------------------------------------------------
+-- El mazo al terminar, y lo que hicieron cristales y suertudas
+--------------------------------------------------------------
+--
+-- Casi todo sale de una lectura al cerrar la partida. El juego lleva en cada
+-- carta base.times_played (state_events.lua lo sube una vez por mano jugada),
+-- asi que las veces que se jugo cada carta NO hay que contarlas aqui.
+--
+-- Quedan dos cosas que el juego no deja apuntadas y hay que mirar al vuelo:
+--
+--   * Las de cristal que se rompen. Al romperse salen de G.playing_cards, asi
+--     que al terminar ya no estan y su historia se perderia. Card:shatter()
+--     es el unico sitio por el que pasan todas.
+--
+--   * Los disparos de las de la suerte. El juego los tira y se olvida: no
+--     queda contador de cuantas veces salio el +20 Mult ni el +$20.
+--
+-- La carta se identifica por sort_id, que el juego le pone al crearla
+-- (card.lua: self.sort_id = G.sort_id) y no cambia mientras viva.
+
+-- [sort_id] = { mult = veces, cash = veces, v_mult = 20, v_cash = 20 }
+local suertudas = {}
+-- Las de cristal que reventaron, con su retrato, porque no llegan al final.
+local rotas = {}
+
+--- Identidad visible de una carta: lo justo para volver a dibujarla.
+local function retrato(card)
+    if type(card) ~= "table" then return nil end
+    local base = card.base or {}
+    local centro = card.config and card.config.center
+    local ed = card.edition
+    return {
+        id    = num(card.sort_id),
+        rank  = base.value,                     -- "King", "10", "Ace"
+        suit  = base.suit,                      -- "Hearts"
+        -- La clave de la mejora, que es igual en todos los idiomas.
+        -- Una carta sin mejorar es m_base; esa no se manda.
+        enh   = (centro and centro.key ~= "m_base") and centro.key or nil,
+        seal  = card.seal,                      -- "Red" | "Gold" | ...
+        ed    = (type(ed) == "table" and ed.type) or nil,
+        -- Veces que se jugo. La lleva el juego, no este mod.
+        played = num(base.times_played),
+    }
+end
+
+--- Las lucky de una carta, si disparo alguna vez.
+local function disparos(id)
+    local d = id and suertudas[id]
+    if not d then return nil end
+    if (d.mult or 0) == 0 and (d.cash or 0) == 0 then return nil end
+    return {
+        mult = d.mult ~= 0 and d.mult or nil,
+        cash = d.cash ~= 0 and d.cash or nil,
+        v_mult = d.v_mult, v_cash = d.v_cash,
+    }
+end
+
+--- El mazo entero al cerrar, mas las de cristal que ya no estan.
+---
+--- Se manda el mazo completo y no solo las interesantes: con 52 cartas son
+--- unos pocos kilobytes y permite ensenar la baraja tal y como quedo. Las
+--- rotas van al final, marcadas, porque en G.playing_cards ya no figuran.
+local function collect_deck()
+    local out = {}
+
+    for _, card in ipairs(G.playing_cards or {}) do
+        local r = retrato(card)
+        if r then
+            r.lucky = disparos(r.id)
+            out[#out + 1] = r
+        end
+    end
+
+    for _, r in ipairs(rotas) do
+        local c = {}
+        for k, v in pairs(r) do c[k] = v end
+        c.broke = true
+        c.lucky = disparos(c.id)
+        out[#out + 1] = c
+    end
+
+    -- El sort_id solo servia para cruzar las dos listas; fuera del juego no
+    -- significa nada y ocupa en cada carta.
+    for _, c in ipairs(out) do c.id = nil end
+
+    return #out > 0 and out or nil
+end
+
+-- Las de cristal que revientan. shatter() es el unico paso comun: lo llama
+-- tanto el final de la puntuacion como The Hanged Man.
+if CFG.track_deck and type(Card) == "table" and type(Card.shatter) == "function" then
+    local shatter_ref = Card.shatter
+    function Card:shatter(...)
+        pcall(function()
+            -- Antes de dejarla pasar: despues la carta esta en camino de
+            -- desaparecer y su base podria no seguir ahi.
+            local r = retrato(self)
+            if r then rotas[#rotas + 1] = r end
+        end)
+        return shatter_ref(self, ...)
+    end
+end
+
+-- Los disparos de las de la suerte.
+--
+-- El juego tira los dos dados en dos sitios distintos (card.lua), y en los dos
+-- marca la MISMA bandera, self.lucky_trigger:
+--
+--   get_chip_mult()   1 de 5   -> +Mult    (ability.mult, 20 de salida)
+--   get_p_dollars()   1 de 15  -> +dinero  (ability.p_dollars, 20 de salida)
+--
+-- Con una sola bandera para los dos no se puede saber cual salto mirandola
+-- despues. La forma de separarlos es envolver cada metodo por su lado y, en
+-- cada uno, apagar la bandera justo antes de dejar pasar la llamada: si al
+-- volver esta encendida, el que la encendio fue ESE metodo.
+--
+-- Apagarla no puede cambiar la partida: se guarda lo que hubiera y al final se
+-- restituye encendida si lo estaba antes O si acaba de saltar. Lucky Cat lee
+-- context.other_card.lucky_trigger mas tarde y la sigue viendo igual.
+local function apunta_lucky(card, clase, valor)
+    local id = num(card and card.sort_id)
+    if not id then return end
+    local d = suertudas[id]
+    if not d then d = { mult = 0, cash = 0 }; suertudas[id] = d end
+    d[clase] = (d[clase] or 0) + 1
+    -- El valor se guarda una vez: es el mismo en cada disparo de esa carta.
+    local campo = "v_" .. clase
+    if d[campo] == nil then d[campo] = num(valor) end
+end
+
+local function envuelve_lucky(metodo, clase, saca_valor)
+    if type(Card) ~= "table" or type(Card[metodo]) ~= "function" then return end
+    local ref = Card[metodo]
+    Card[metodo] = function(self, ...)
+        -- Solo las de la suerte tiran el dado; en el resto esto no toca nada.
+        local mira = type(self) == "table" and self.ability
+                     and self.ability.effect == "Lucky Card"
+        if not mira then return ref(self, ...) end
+
+        local antes = self.lucky_trigger
+        self.lucky_trigger = nil
+        local a, b, c = ref(self, ...)
+        local salto = self.lucky_trigger and true or false
+        self.lucky_trigger = (antes or salto) or nil
+        if salto then pcall(apunta_lucky, self, clase, saca_valor(self)) end
+        return a, b, c
+    end
+end
+
+if CFG.track_deck then
+    envuelve_lucky("get_chip_mult", "mult",
+                   function(c) return c.ability and c.ability.mult end)
+    envuelve_lucky("get_p_dollars", "cash",
+                   function(c) return c.ability and c.ability.p_dollars end)
+end
+
 
 --------------------------------------------------------------
 -- Lo que pedia cada ronda y lo que sacaste
@@ -1522,6 +1685,8 @@ local function build_payload(result)
         -- Los vales que canjeaste, en orden.
         vouchers = try(voucher_history),
         hands        = try(collect_hands),
+        -- El mazo al cerrar, con las de cristal rotas al final.
+        deck         = CFG.track_deck and try(collect_deck) or nil,
         game_version = try(function() return G.VERSION end),
         platform     = try(function() return love.system.getOS() end),
         player         = try(resolved_player_name),   -- "TimelessC1"
@@ -2672,6 +2837,10 @@ function Game:start_run(args)
     local ret = start_run_ref(self, args)
     joker_peaks = {}
     modded_joker_seen = nil
+    -- Lo de cristales y suertudas es por partida: sin vaciarlo, la siguiente
+    -- de la misma sesion heredaria los disparos de esta.
+    suertudas = {}
+    rotas = {}
     pcall(scan_jokers_for_mods)   -- partidas cargadas de un guardado
     -- Al cargar una partida ya ganada (modo infinito) no se vuelve a reportar.
     reported = (G.GAME and (G.GAME.win_notified or G.GAME.won)) and true or false
